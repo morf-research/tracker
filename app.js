@@ -11,6 +11,7 @@ const POLL_MS = 30000;         // how often open pages check for other people's 
 const DEMO = !API_URL || new URLSearchParams(location.search).has('demo');
 
 const OPT = {
+  person_role: ['PI', 'Research fellow', 'Resident', 'Student', 'Other'], // same as PEOPLE_ROLES; not user-extendable
   category: ['Research', 'QI'],
   subspecialty: ['General Orthopaedics', 'Shoulder', 'Elbow', 'Hand', 'Sports', 'Spine', 'Hip & Knee',
     'Foot and Ankle', 'Trauma', 'Orthopaedic Oncology', 'Pediatric Orthopaedics'],
@@ -41,6 +42,10 @@ const NEW_CHOICE = '__new__';
 // Fields where people are picked from the People list (names separated by commas). Must match Code.gs.
 const PEOPLE_FIELDS = { Projects: ['pi', 'lead_fellow', 'lead_resident', 'team'], Tasks: ['assignee'], Deadlines: ['team'], Submissions: ['presenter'] };
 const PEOPLE_COLORS = ['blue', 'indigo', 'purple', 'magenta', 'pink', 'red', 'orange', 'amber', 'lime', 'green', 'teal', 'brown', 'grey'];
+const PEOPLE_ROLES = ['PI', 'Research fellow', 'Resident', 'Student', 'Other'];
+const ROLE_GROUP = { 'PI': 'PIs', 'Research fellow': 'Research fellows', 'Resident': 'Residents', 'Student': 'Students', 'Other': 'Other', '': 'Role not set' };
+// The role a field asks for: its dropdown lists that role first, and a person added there gets it by default.
+const FIELD_ROLE = { pi: 'PI', lead_fellow: 'Research fellow', lead_resident: 'Resident' };
 const COLOR_LABEL = { blue: 'Blue', indigo: 'Indigo', purple: 'Purple', magenta: 'Magenta', pink: 'Pink', red: 'Red', orange: 'Orange', amber: 'Gold', lime: 'Lime', green: 'Green', teal: 'Teal', brown: 'Brown', grey: 'Grey' };
 // Entries people can follow by email (must match WATCHABLE in Code.gs).
 const WATCHABLE = ['Projects', 'Tasks', 'Deadlines', 'Grants', 'Submissions', 'Ideas'];
@@ -123,6 +128,7 @@ const SCHEMA = {
   Options: { noun: 'dropdown choice', fields: [
     { k: 'list', l: 'Dropdown list', t: 'list', req: true, full: true },
     { k: 'value', l: 'Choice (or the person\'s name)', t: 'text', req: true, full: true, ph: 'e.g., Skeletal Dynamics', max: 80 },
+    { k: 'role', l: 'Role', t: 'select', o: 'person_role', full: true, when: 'people' },
     { k: 'color', l: 'User Highlight Color', t: 'color', full: true, when: 'people' },
   ]},
 };
@@ -246,6 +252,12 @@ function personRec(name) {
   const k = String(name || '').trim().toLowerCase();
   return customChoices('people').find(o => o.value.trim().toLowerCase() === k);
 }
+function personRole(o) { return o && PEOPLE_ROLES.includes(o.role) ? o.role : ''; }
+// People split by role, in a fixed order with one role first; empty roles are left out.
+function roleGroups(people, first) {
+  const order = (first ? [first] : []).concat(PEOPLE_ROLES.filter(r => r !== first), ['']);
+  return order.map(r => [r, people.filter(o => personRole(o) === r)]).filter(g => g[1].length);
+}
 function personColor(o) { return o && PEOPLE_COLORS.includes(o.color) ? o.color : 'blue'; }
 function personPill(name, removable) {
   const p = personRec(name), shown = p ? p.value : name;
@@ -308,11 +320,16 @@ async function demoDb() {
   Object.keys(SCHEMA).forEach(t => { if (!db.data[t]) db.data[t] = []; }); // previews saved before a tab existed
   if (!db.peopleImported) { // same as importPeople_() in Code.gs, which setup runs on the real Sheet
     const known = new Set(db.data.Options.filter(o => o.list === 'people').map(o => o.value.trim().toLowerCase()));
+    const roles = {}, add = [];
     Object.keys(PEOPLE_FIELDS).forEach(t => db.data[t].forEach(r => PEOPLE_FIELDS[t].forEach(k => splitNames(r[k]).forEach(n => {
+      if (t === 'Projects' && FIELD_ROLE[k]) (roles[n.toLowerCase()] = roles[n.toLowerCase()] || new Set()).add(FIELD_ROLE[k]);
       if (known.has(n.toLowerCase()) || n.length > 80) return;
-      known.add(n.toLowerCase());
-      db.data.Options.push({ id: 'o' + Math.random().toString(16).slice(2, 10), list: 'people', value: n, color: 'blue', updated_at: new Date().toISOString(), updated_by: 'setup', archived: '' });
+      known.add(n.toLowerCase()); add.push(n);
     }))));
+    add.forEach(n => {
+      const rs = [...(roles[n.toLowerCase()] || [])];
+      db.data.Options.push({ id: 'o' + Math.random().toString(16).slice(2, 10), list: 'people', value: n, color: 'blue', role: rs.length === 1 ? rs[0] : '', updated_at: new Date().toISOString(), updated_by: 'setup', archived: '' });
+    });
     db.peopleImported = true;
     localStorage.setItem(DEMO_KEY, JSON.stringify(db));
   }
@@ -373,7 +390,8 @@ async function demoApi(action, p) {
     if (o.list === 'people') {
       if (/[,;]/.test(o.value)) throw apiError('bad_request', 'Names cannot contain commas or semicolons.');
       if (!PEOPLE_COLORS.includes(o.color)) o.color = 'blue';
-    } else o.color = '';
+      if (!PEOPLE_ROLES.includes(o.role)) o.role = '';
+    } else { o.color = ''; o.role = ''; }
   };
   const clean = rec => {
     const o = {};
@@ -626,8 +644,10 @@ function personFilter(view, rows) {
   }));
   if (cur && !seen.has(cur.toLowerCase())) seen.set(cur.toLowerCase(), cur);
   const names = [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  const opt = n => '<option value="' + esc(n) + '"' + (n.toLowerCase() === cur.toLowerCase() ? ' selected' : '') + '>' + esc(n) + '</option>';
   return '<select data-filter="person" aria-label="Team member"><option value="">Team member: all</option>' +
-    names.map(n => '<option value="' + esc(n) + '"' + (n.toLowerCase() === cur.toLowerCase() ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select>';
+    roleGroups(names.map(n => ({ value: n, role: personRole(personRec(n)) }))).map(g =>
+      '<optgroup label="' + esc(ROLE_GROUP[g[0]]) + '">' + g[1].map(o => opt(o.value)).join('') + '</optgroup>').join('') + '</select>';
 }
 function search(view, ph) {
   return '<input type="search" data-filter="q" placeholder="' + esc(ph || 'Search') + '" value="' + esc(F(view).q || '') + '">';
@@ -1105,11 +1125,13 @@ function choicesBody() {
   const people = customChoices('people').slice().sort(byText('value'));
   const peopleCard = '<section class="card people-card"><h3>People' + addBtn('Options', { list: 'people' }, 'Add person') + '</h3>' +
     '<p class="small muted">Names to pick for PI, lead fellow, lead resident, team members, task assignee, conference team, and presenter.' +
-    (admin ? ' Admin: click a name to rename it, change its color, or delete it. Renaming changes the name on every entry that uses it.' : '') + '</p>' +
-    '<div class="choices">' + (people.length ? people.map(o => admin
-      ? '<button type="button" class="pill person ' + personColor(o) + ' editable" data-edit="Options:' + esc(o.id) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '. Click to rename, recolor, or delete.">' + esc(o.value) + '</button>'
-      : '<span class="pill person ' + personColor(o) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '">' + esc(o.value) + '</span>').join('')
-      : '<span class="muted small">No one yet. Add a person here or from any PI, lead, or team field.</span>') + '</div></section>';
+    ' Each dropdown lists people by role, with the role that field asks for first.' +
+    (admin ? ' Admin: click a name to rename it, change its role or color, or delete it. Renaming changes the name on every entry that uses it.' : '') + '</p>' +
+    (people.length ? roleGroups(people).map(g => '<div class="role-row" data-role="' + esc(g[0]) + '"><span class="role-name">' + esc(ROLE_GROUP[g[0]]) +
+      ' <span class="muted">(' + g[1].length + ')</span></span><div class="choices">' + g[1].map(o => admin
+      ? '<button type="button" class="pill person ' + personColor(o) + ' editable" data-edit="Options:' + esc(o.id) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '. Click to rename, recolor, change role, or delete.">' + esc(o.value) + '</button>'
+      : '<span class="pill person ' + personColor(o) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '">' + esc(o.value) + '</span>').join('') + '</div></div>').join('')
+      : '<div class="choices"><span class="muted small">No one yet. Add a person here or from any PI, lead, or team field.</span></div>') + '</section>';
   return peopleCard + '<div class="grid">' + Object.keys(LIST_LABELS).filter(k => k !== 'people').map(k => {
     const added = customChoices(k).slice().sort(byText('value'));
     return '<section class="card"><h3>' + esc(LIST_LABELS[k]) + addBtn('Options', { list: k }, 'Add') + '</h3><div class="choices">' +
@@ -1154,7 +1176,9 @@ function renderPicker(box) {
   box.querySelector('.chips').innerHTML = names.length ? names.map(n => personPill(n, true)).join('') : '<span class="muted small">No one chosen</span>';
   const avail = customChoices('people').filter(o => !lower.includes(o.value.trim().toLowerCase())).sort(byText('value'));
   box.querySelector('.people-add').innerHTML = '<option value="">' + (names.length ? 'Add another person…' : 'Choose a person…') + '</option>' +
-    avail.map(o => '<option>' + esc(o.value) + '</option>').join('') + '<option value="' + NEW_CHOICE + '">+ Add a new person…</option>';
+    roleGroups(avail, FIELD_ROLE[box.dataset.people]).map(g => '<optgroup label="' + esc(ROLE_GROUP[g[0]]) + '">' +
+      g[1].map(o => '<option>' + esc(o.value) + '</option>').join('') + '</optgroup>').join('') +
+    '<option value="' + NEW_CHOICE + '">+ Add a new person…</option>';
 }
 function setPicked(box, names) { box.querySelector('input[type=hidden]').value = names.join(', '); renderPicker(box); }
 function pickPerson(box, name) {
@@ -1166,15 +1190,17 @@ async function addPersonFromForm(box) {
   const panel = box.querySelector('.newperson'), input = panel.querySelector('.np-name');
   const name = input.value.trim().replace(/\s+/g, ' ').slice(0, 80);
   const color = (panel.querySelector('input[type=radio]:checked') || {}).value || 'blue';
+  const roleSel = panel.querySelector('.np-role'), role = roleSel.value;
   if (!name) { toast('Type the person\'s name.', 'error'); input.focus(); return; }
   if (/[,;]/.test(name)) { toast('Names cannot contain commas or semicolons.', 'error'); input.focus(); return; }
   const done = n => { pickPerson(box, n); panel.hidden = true; input.value = ''; };
   const existing = personRec(name);
   if (existing) { done(existing.value); toast(existing.value + ' is already in the People list, so they were selected.'); return; }
+  if (!role) { toast('Choose a role for ' + name + ': PI, research fellow, resident, student, or other.', 'error'); roleSel.focus(); return; }
   const btn = panel.querySelector('[data-np-save]');
   btn.disabled = true; state.busy = true;
   try {
-    const j = await api('create', { tab: 'Options', record: { list: 'people', value: name, color: color } });
+    const j = await api('create', { tab: 'Options', record: { list: 'people', value: name, color: color, role: role } });
     applySaved('Options', j.record, j.version);
     done(j.record.value);
     document.querySelectorAll('#rec-form .people').forEach(b => { if (b !== box) renderPicker(b); });
@@ -1207,6 +1233,8 @@ function fieldHtml(f, val, vals) {
       '<div class="people" data-people="' + f.k + '"><input type="hidden" name="' + f.k + '" value="' + esc(v) + '">' +
       '<div class="chips"></div><select class="people-add" id="' + id + '" aria-labelledby="' + id + '-l"></select>' +
       '<div class="newperson" hidden><input type="text" class="np-name" maxlength="80" placeholder="Full name, e.g., Jane Smith" aria-label="New person\'s name">' +
+      '<span class="flabel">Role</span><select class="np-role" aria-label="Role of the new person"><option value="">Choose a role…</option>' +
+      PEOPLE_ROLES.map(r => '<option' + (r === FIELD_ROLE[f.k] ? ' selected' : '') + '>' + esc(r) + '</option>').join('') + '</select>' +
       '<span class="flabel">User Highlight Color</span>' + swatches('np-color-' + f.k, 'blue') +
       '<div class="np-actions"><button type="button" class="btn sm primary" data-np-save="1">Add person</button>' +
       '<button type="button" class="btn sm" data-np-cancel="1">Cancel</button></div></div></div></div>';
@@ -1243,7 +1271,8 @@ function fieldHtml(f, val, vals) {
     const type = f.t === 'date' ? 'date' : f.t === 'url' ? 'url' : 'text';
     input = '<input type="' + type + '" ' + attrs + ' value="' + esc(v) + '"' + (f.ph ? ' placeholder="' + esc(f.ph) + '"' : '') + ' maxlength="' + (f.max || 4000) + '">';
   }
-  return '<label class="' + (f.full ? 'full' : '') + '" for="' + id + '">' + label + input + '</label>';
+  const when = f.when ? ' data-when="' + esc(f.when) + '"' + ((vals || {}).list === f.when ? '' : ' hidden') : '';
+  return '<label class="' + (f.full ? 'full' : '') + '" for="' + id + '"' + when + '>' + label + input + '</label>';
 }
 
 function openForm(tab, id, preset) {
@@ -1279,6 +1308,7 @@ function openForm(tab, id, preset) {
     ev.preventDefault();
     const record = {};
     sch.fields.forEach(f => { record[f.k] = form.elements[f.k].value.trim(); });
+    if (tab === 'Options' && record.list === 'people' && !record.role) { toast('Choose a role for this person.', 'error'); form.elements.role.focus(); return; }
     const missing = sch.fields.filter(f => f.req && !record[f.k]);
     if (missing.length) { toast('Fill in: ' + missing.map(f => f.l).join(', '), 'error'); form.elements[missing[0].k].focus(); return; }
     if (record.start_date && record.end_date && record.end_date < record.start_date) { toast('The last day is before the first day.', 'error'); return; }

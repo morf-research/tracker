@@ -380,3 +380,8 @@ label.sw input:checked + .pill { border-color: currentColor; box-shadow: 0 0 0 2
 label.sw input:checked + .pill::before { content: '✓ '; }
 label.sw input:focus-visible + .pill { outline: 2px solid var(--accent); outline-offset: 1px; }
 .subspec-head .legacy { font-weight: 400; }
+.newperson select.np-role { max-width: 260px; }
+.people-card .role-row { display: flex; gap: .6rem; align-items: baseline; padding: .35rem 0; border-top: 1px solid var(--line); }
+.people-card .role-row:first-of-type { border-top: 0; }
+.people-card .role-name { flex: 0 0 9.5rem; font-size: .82rem; font-weight: 700; color: var(--muted); }
+@media (max-width: 640px) { .people-card .role-row { flex-direction: column; gap: .3rem; } .people-card .role-name { flex: none; } }
