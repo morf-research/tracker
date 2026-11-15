@@ -170,6 +170,14 @@ tr.past td { color: var(--muted); }
 .list button.linkish:hover { color: var(--accent); }
 .stat-rows { display: grid; gap: .35rem; }
 .stat-rows div { display: flex; justify-content: space-between; gap: .5rem; }
+.stat-rows { gap: .1rem; }
+.stat-link { display: flex; justify-content: space-between; align-items: center; gap: .5rem; width: 100%; padding: .25rem .4rem; margin: 0 -.4rem; box-sizing: content-box;
+  border: 0; border-radius: 6px; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.stat-link:hover, .stat-link:focus-visible { background: var(--accent-soft); }
+.stat-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.stat-link .stat-n { display: inline-flex; align-items: center; gap: .45rem; }
+.stat-link .go { color: var(--muted); font-size: 1.05rem; line-height: 1; }
+.stat-link:hover .go { color: var(--accent); }
 
 /* ---------- Calendar ---------- */
 .cal { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 1.25rem; overflow: hidden; }
@@ -385,3 +393,35 @@ label.sw input:focus-visible + .pill { outline: 2px solid var(--accent); outline
 .people-card .role-row:first-of-type { border-top: 0; }
 .people-card .role-name { flex: 0 0 9.5rem; font-size: .82rem; font-weight: 700; color: var(--muted); }
 @media (max-width: 640px) { .people-card .role-row { flex-direction: column; gap: .3rem; } .people-card .role-name { flex: none; } }
+button.pill.person.person-link { border: 1px solid transparent; font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; }
+button.pill.person.person-link.unlisted { border: 1px dashed #98a2b3; }
+button.pill.person.person-link:hover, button.pill.person.person-link:focus-visible { border-color: currentColor; text-decoration: underline; }
+.person-note { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: 0 0 .6rem; padding: .45rem .7rem; border: 1px solid var(--line); border-radius: 8px; background: var(--accent-soft); font-size: .88rem; }
+.person-note span { margin-right: auto; }
+.tl-section { margin-top: 2.25rem; padding-top: 1.5rem; border-top: 2px solid var(--line); scroll-margin-top: 1rem; }
+th.sortable { padding: 0; }
+th .th-sort { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: .3rem; width: 100%; padding: .6rem .75rem; cursor: pointer;
+  font: inherit; text-transform: inherit; letter-spacing: inherit; color: inherit; white-space: nowrap; }
+th .th-sort:hover { color: var(--accent); background: var(--accent-soft); }
+th .th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+th .sort-ind { font-size: .7rem; opacity: .45; }
+th.sorted { color: var(--accent); }
+th.sorted .sort-ind { opacity: 1; }
+/* Submissions dropdown under a conference in the deadlines list */
+.name-cell { display: flex; align-items: flex-start; gap: .45rem; }
+.subs-spacer { flex: 0 0 2.6rem; }
+.subs-toggle { flex: 0 0 2.6rem; display: inline-flex; align-items: center; justify-content: center; gap: .2rem; height: 1.6rem; margin-top: -.1rem;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--accent); cursor: pointer; font: inherit; font-size: .75rem; font-weight: 700; padding: 0 .3rem; }
+.subs-toggle:hover, .subs-toggle:focus-visible { border-color: var(--accent); background: var(--accent-soft); }
+.subs-toggle .chev { display: inline-block; transition: transform .15s; font-size: .8rem; }
+.subs-toggle.open .chev { transform: rotate(90deg); }
+.subs-toggle.open { background: var(--accent-soft); border-color: var(--accent); }
+tr.subs-open > td { background: #f7f9fc; border-bottom-color: transparent; }
+tr.subs-open > td:first-child, tr.subs-row > td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+tr.subs-row > td { background: #f7f9fc; font-size: .86rem; padding-top: .4rem; padding-bottom: .4rem; border-bottom: 1px solid #e8eef6; }
+tr.subs-row[data-edit]:hover > td { background: #edf2f9; }
+tr.subs-row .subs-title { font-weight: 600; color: var(--accent); }
+tr.subs-row[data-edit]:hover .subs-title { text-decoration: underline; }
+tr.subs-foot > td { padding-top: .5rem; padding-bottom: .6rem; border-bottom: 1px solid var(--line); }
+tr.subs-foot .muted { margin-right: .5rem; }
+@media (max-width: 640px) { .subs-spacer { display: none; } .subs-toggle { flex-basis: 2.2rem; } }

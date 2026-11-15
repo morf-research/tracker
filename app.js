@@ -13,11 +13,12 @@ const DEMO = !API_URL || new URLSearchParams(location.search).has('demo');
 const OPT = {
   person_role: ['PI', 'Research fellow', 'Resident', 'Student', 'Other'], // same as PEOPLE_ROLES; not user-extendable
   category: ['Research', 'QI'],
-  subspecialty: ['General Orthopaedics', 'Shoulder', 'Elbow', 'Hand', 'Sports', 'Spine', 'Hip & Knee',
+  subspecialty: ['General Orthopaedics', 'Shoulder and Elbow', 'Hand', 'Sports', 'Spine', 'Hip & Knee (Recon)',
     'Foot and Ankle', 'Trauma', 'Orthopaedic Oncology', 'Pediatric Orthopaedics'],
   project_group: ['TriNetX retrospective', 'Clinical Prospective', 'Review Article', 'QI Project', 'Other'],
   focus_area: ['Method Development', 'Data Analysis', 'Quality Improvement'],
-  project_status: ['Not started', 'Literature review', 'Data collection', 'Drafting Manuscript', 'Manuscript Completed', 'Submitted', 'Published'],
+  project_status: ['Not started', 'Literature review', 'Data collection', 'Drafting Manuscript', 'Manuscript Completed', 'Submitted', 'Revisions', 'Rejected',
+    'Re-submitted', 'Accepted, Pending Publication', 'Published'],
   task_status: ['To Do', 'In Progress', 'Done'],
   task_type: ['Analysis', 'Experiment', 'Writing', 'Admin'],
   deadline_type: ['Conference', 'Abstract/Poster Deadline', 'Grant Deadline', 'Scholarship', 'Educational Course'],
@@ -51,7 +52,8 @@ const COLOR_LABEL = { blue: 'Blue', indigo: 'Indigo', purple: 'Purple', magenta:
 const WATCHABLE = ['Projects', 'Tasks', 'Deadlines', 'Grants', 'Submissions', 'Ideas'];
 const EMAIL_RE = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[A-Za-z]{2,}$/;
 // Project statuses that count as finished (shown under "Done" instead of "Active").
-const DONE_PROJECT = ['Manuscript Completed', 'Submitted', 'Published'];
+// A project is Done only once it is published; until then (even accepted, pending publication) it stays Active.
+const DONE_PROJECT = ['Published'];
 
 // Form fields for each Sheet tab. Keys must match the column names in backend/Code.gs.
 const SCHEMA = {
@@ -106,7 +108,7 @@ const SCHEMA = {
     { k: 'status', l: 'Status', t: 'select', o: 'sub_status' },
     { k: 'submitted_date', l: 'Date submitted', t: 'date' },
     { k: 'presentation_date', l: 'Presentation date (blank = linked conference date)', t: 'date' },
-    { k: 'presenter', l: 'Presenter / first author', t: 'people', full: true },
+    { k: 'presenter', l: 'Presenter (who will present)', t: 'people', full: true, req: true },
     { k: 'notes', l: 'Notes', t: 'textarea', full: true },
   ]},
   Contacts: { noun: 'contact', fields: [
@@ -135,7 +137,7 @@ const SCHEMA = {
 
 const VIEWS = [
   ['dashboard', 'Dashboard'], ['research', 'Research'], ['qi', 'QI Projects'], ['ideas', 'New Ideas'], ['tasks', 'Tasks'],
-  ['deadlines', 'Conferences & Deadlines'], ['timeline', 'Timeline'], ['grants', 'Grants'], ['submissions', 'Submissions'],
+  ['deadlines', 'Calendar (Conferences & Deadlines)'], ['grants', 'Grants'], ['submissions', 'Submissions'],
 ];
 const ALL_VIEWS = VIEWS.concat([['choices', 'Dropdown lists']]);
 function views() { return ALL_VIEWS; }
@@ -214,6 +216,12 @@ function opts(list) {
   });
   return out;
 }
+// Renamed subspecialties: entries saved under the old name show under the new one, and the edit form switches them over.
+const SUBSPEC_RENAMED = { 'shoulder': 'Shoulder and Elbow', 'elbow': 'Shoulder and Elbow', 'hip & knee': 'Hip & Knee (Recon)' };
+function subspec(v) {
+  const k = String(v || '').trim().toLowerCase(), to = SUBSPEC_RENAMED[k];
+  return to && !opts('subspecialty').some(o => o.toLowerCase() === k) ? to : (v || '');
+}
 function customChoices(list) {
   return ((state.data && state.data.Options) || []).filter(o => o.list === list && o.value);
 }
@@ -226,7 +234,7 @@ function tone(s) {
   s = String(s || '').toLowerCase();
   if (/reject|not awarded/.test(s)) return 'red';
   if (/done|complet|published|accepted|awarded|presented|became/.test(s)) return 'green';
-  if (/draft|progress|submitted|collection|analysis|planning|forming/.test(s)) return 'amber';
+  if (/draft|progress|submitted|revision|collection|analysis|planning|forming/.test(s)) return 'amber';
   if (/literature|researching|open for/.test(s)) return 'blue';
   return 'grey';
 }
@@ -242,9 +250,9 @@ function typeClass(t) {
 }
 function typePill(t) { return t ? '<span class="pill ' + typeClass(t) + '">' + esc(t) + '</span>' : ''; }
 function hasPeople(p) { return !!(p.pi || p.lead_fellow || p.lead_resident || p.team); }
-function peopleHtml(p) {
+function peopleHtml(p, link) {
   const rows = [['PI', p.pi], ['Lead fellow', p.lead_fellow], ['Lead resident', p.lead_resident], ['Team', p.team]].filter(x => splitNames(x[1]).length);
-  return rows.length ? '<div class="sub people-line">' + rows.map(x => '<span class="ppl-grp"><span class="role">' + x[0] + ':</span> ' + peoplePills(x[1]) + '</span>').join(' ') + '</div>' : '';
+  return rows.length ? '<div class="sub people-line">' + rows.map(x => '<span class="ppl-grp"><span class="role">' + x[0] + ':</span> ' + peoplePills(x[1], link) + '</span>').join(' ') + '</div>' : '';
 }
 // ---------- People (picked from the People list; each has a user highlight color) ----------
 function splitNames(s) { return String(s || '').split(/[,;]/).map(x => x.trim()).filter(Boolean); }
@@ -259,12 +267,15 @@ function roleGroups(people, first) {
   return order.map(r => [r, people.filter(o => personRole(o) === r)]).filter(g => g[1].length);
 }
 function personColor(o) { return o && PEOPLE_COLORS.includes(o.color) ? o.color : 'blue'; }
-function personPill(name, removable) {
+function personPill(name, removable, link) {
   const p = personRec(name), shown = p ? p.value : name;
+  // link: a button that filters the project list to this person's projects (Research and QI).
+  if (link) return '<button type="button" class="pill person person-link ' + (p ? personColor(p) : 'unlisted') + '" data-person="' + esc(shown) + '" title="Show every project with ' + esc(shown) +
+    (p ? '' : ' (not in the People list)') + '">' + esc(shown) + '</button>';
   return '<span class="pill person ' + (p ? personColor(p) : 'unlisted') + '"' + (p ? '' : ' title="Not in the People list"') + '>' + esc(shown) +
     (removable ? '<button type="button" class="chip-x" data-unpick="' + esc(name) + '" aria-label="Remove ' + esc(shown) + '">×</button>' : '') + '</span>';
 }
-function peoplePills(s) { return splitNames(s).map(n => personPill(n)).join(' '); }
+function peoplePills(s, link) { return splitNames(s).map(n => personPill(n, false, link)).join(' '); }
 function swatches(name, selected) {
   return '<div class="swatches" role="radiogroup">' + PEOPLE_COLORS.map(c =>
     '<label class="sw"><input type="radio" name="' + name + '" value="' + c + '"' + (c === (selected || 'blue') ? ' checked' : '') + '>' +
@@ -595,6 +606,11 @@ function refreshView() {
 
 function renderView() {
   if (!state.data || !$('#main')) return;
+  if (state.view === 'timeline' || state.view === 'gantt') { // the Timeline tab is now part of the Calendar page
+    state.view = 'deadlines';
+    history.replaceState(null, '', '#deadlines');
+    setTimeout(() => { const g = $('#gantt'); if (g) g.scrollIntoView({ block: 'start' }); }, 0);
+  }
   if (!views().some(v => v[0] === state.view)) state.view = 'dashboard';
   document.querySelectorAll('#tabs a').forEach(a => a.classList.toggle('active', a.dataset.view === state.view));
   $('#main').innerHTML = VIEW_DEF[state.view].shell();
@@ -605,6 +621,8 @@ function renderView() {
 function renderResults() {
   const el = $('#results');
   if (el) el.innerHTML = VIEW_DEF[state.view].body();
+  const el2 = $('#results-tl'), b2 = VIEW_DEF[state.view].body2;
+  if (el2 && b2) el2.innerHTML = b2();
 }
 
 function head(title, text, addTab, preset, addLabel) {
@@ -618,13 +636,15 @@ function addBtn(tab, preset, label) {
 function seg(view, key, options) {
   const cur = F(view)[key];
   return '<div class="seg" role="group">' + options.map(o =>
-    '<button type="button" data-seg="' + key + '" data-val="' + esc(o[0]) + '" class="' + (cur === o[0] ? 'on' : '') + '">' + esc(o[1]) + '</button>').join('') + '</div>';
+    '<button type="button" data-seg="' + key + '" data-fv="' + view + '" data-val="' + esc(o[0]) + '" class="' + (cur === o[0] ? 'on' : '') + '">' + esc(o[1]) + '</button>').join('') + '</div>';
 }
-function selectFilter(view, key, label, values) {
+function selectFilter(view, key, label, values, names) {
   const cur = F(view)[key] || '';
-  return '<select data-filter="' + key + '" aria-label="' + esc(label) + '"><option value="">' + esc(label) + ': all</option>' +
-    values.map(v => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select>';
+  return '<select data-filter="' + key + '" data-fv="' + view + '" aria-label="' + esc(label) + '"><option value="">' + esc(label) + ': all</option>' +
+    values.map(v => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc((names && names[v]) || v) + '</option>').join('') + '</select>';
 }
+const NO_STATUS = '__none__'; // status filter value for projects with no status set
+function statusMatch(p, st) { return !st || (st === NO_STATUS ? !p.status : p.status === st); }
 function projectFilter(view, rows) {
   const cur = F(view).project || '';
   const ids = [...new Set(rows.map(r => r.project_id).filter(id => state.byId[id]))];
@@ -650,12 +670,25 @@ function personFilter(view, rows) {
       '<optgroup label="' + esc(ROLE_GROUP[g[0]]) + '">' + g[1].map(o => opt(o.value)).join('') + '</optgroup>').join('') + '</select>';
 }
 function search(view, ph) {
-  return '<input type="search" data-filter="q" placeholder="' + esc(ph || 'Search') + '" value="' + esc(F(view).q || '') + '">';
+  return '<input type="search" data-filter="q" data-fv="' + view + '" placeholder="' + esc(ph || 'Search') + '" value="' + esc(F(view).q || '') + '">';
 }
-function table(cols, rows, rowAttrs) {
+function sortHead(c, sort) {
+  if (!sort || !c[3]) return '<th>' + esc(c[0]) + '</th>';
+  const on = sort.key === c[3], desc = sort.dir === 'desc';
+  return '<th class="sortable' + (on ? ' sorted' : '') + '" aria-sort="' + (on ? (desc ? 'descending' : 'ascending') : 'none') + '">' +
+    '<button type="button" class="th-sort" data-sort="' + c[3] + '" data-fv="' + sort.view + '" title="Sort by ' + esc(c[0]) + (on ? (desc ? ' (click for ascending)' : ' (click for descending)') : '') + '">' +
+    esc(c[0]) + '<span class="sort-ind" aria-hidden="true">' + (on ? (desc ? '▼' : '▲') : '↕') + '</span></button></th>';
+}
+// Current sort of a view's table: the column clicked last, or the view's default order.
+function sortOf(view) {
+  const f = F(view);
+  if (f.sort) return { view: view, key: f.sort, dir: f.dir === 'desc' ? 'desc' : 'asc' };
+  return { view: view, key: view === 'deadlines' ? 'date' : '', dir: view === 'deadlines' && f.show === 'past' ? 'desc' : 'asc', dflt: true };
+}
+function table(cols, rows, rowAttrs, sort, after) {
   if (!rows.length) return '<div class="table-wrap"><div class="empty">Nothing here yet.</div></div>';
-  return '<div class="table-wrap"><table><thead><tr>' + cols.map(c => '<th>' + esc(c[0]) + '</th>').join('') + '</tr></thead><tbody>' +
-    rows.map(r => '<tr ' + rowAttrs(r) + '>' + cols.map(c => '<td' + (c[2] ? ' class="' + c[2] + '"' : '') + '>' + c[1](r) + '</td>').join('') + '</tr>').join('') +
+  return '<div class="table-wrap"><table><thead><tr>' + cols.map(c => sortHead(c, sort)).join('') + '</tr></thead><tbody>' +
+    rows.map(r => '<tr ' + rowAttrs(r) + '>' + cols.map(c => '<td' + (c[2] ? ' class="' + c[2] + '"' : '') + '>' + c[1](r) + '</td>').join('') + '</tr>' + (after ? after(r) : '')).join('') +
     '</tbody></table></div>';
 }
 function editAttrs(tab, extraClass) {
@@ -677,8 +710,8 @@ function dashboardShell() {
   return '<div class="card" style="margin-bottom:1rem"><details class="howto" id="howto"' + (open ? ' open' : '') + '><summary>How to use this tracker</summary><ol>' +
     '<li><b>Projects:</b> add yours under <b>Research</b> or <b>QI Projects</b> with "+ Add project". Keep <b>Status</b> and <b>Team</b> current.</li>' +
     '<li><b>Tasks:</b> break work into tasks and link each one to its project. Ticking a task off updates that project\'s <b>Progress</b> and <b>Next due</b>.</li>' +
-    '<li><b>Conferences &amp; Deadlines:</b> add conference dates, abstract deadlines, scholarships, and courses. Grants go under <b>Grants</b> and also show on the calendar.</li>' +
-    '<li><b>Timeline:</b> a Gantt chart of conferences, courses, abstract and grant deadlines, and each submission from the date it was sent to its presentation.</li>' +
+    '<li><b>Calendar (Conferences &amp; Deadlines):</b> add conference dates, abstract deadlines, scholarships, and courses. Grants go under <b>Grants</b> and also show on the calendar. ' +
+    'At the bottom of the page, the <b>Timeline</b> Gantt chart shows conferences, courses, abstract and grant deadlines, and each submission from the date it was sent to its presentation.</li>' +
     '<li><b>Submissions:</b> log every abstract or manuscript you send out, then update its status when you hear back (Accepted, Presented, Published).</li>' +
     '<li><b>QI:</b> everyone needs one QI project to graduate. Projects marked <b>Needs owner</b> are open; add your name as lead resident and contact a research fellow.</li>' +
     '<li><b>Email updates:</b> open any project, task, deadline, grant, submission, or idea and click <b>Email me updates</b>. You get a summary at about 6 am and 6 pm only when something you follow changed. Conferences, deadlines, and grants also send reminders 1 month, 2 weeks, 1 week, and 1 day before. Each email has links to unsubscribe from one entry or from everything.</li>' +
@@ -716,8 +749,12 @@ function dashboardBody() {
     rows.forEach(p => { const s = p.status || 'No status'; counts[s] = (counts[s] || 0) + 1; });
     const order = opts('project_status').concat(['No status']);
     const keys = Object.keys(counts).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+    const view = cat === 'QI' ? 'qi' : 'research';
     return '<p class="count">' + rows.length + ' projects</p><div class="stat-rows">' +
-      keys.map(k => '<div><span>' + pill(k === 'No status' ? '' : k) + (k === 'No status' ? '<span class="muted">No status</span>' : '') + '</span><b>' + counts[k] + '</b></div>').join('') + '</div>';
+      keys.map(k => '<button type="button" class="stat-link" data-status-go="' + view + '" data-status="' + esc(k === 'No status' ? NO_STATUS : k) + '" ' +
+        'title="Show the ' + counts[k] + ' ' + esc(cat) + ' project' + (counts[k] === 1 ? '' : 's') + ' with status ' + esc(k) + '">' +
+        '<span>' + pill(k === 'No status' ? '' : k) + (k === 'No status' ? '<span class="muted">No status</span>' : '') + '</span>' +
+        '<span class="stat-n"><b>' + counts[k] + '</b><span class="go" aria-hidden="true">›</span></span></button>').join('') + '</div>';
   };
 
   const needOwner = d.Projects.filter(p => p.category === 'QI' && !hasPeople(p) && !DONE_PROJECT.includes(p.status)).sort(byText('title'));
@@ -748,10 +785,10 @@ function projectsShell(view, cat) {
   const rows = state.data.Projects.filter(p => p.category === cat);
   const intro = cat === 'QI'
     ? 'Plenty to go around: everybody needs one to graduate. Open projects are marked <b>Needs owner</b>; claim one and contact a research fellow.'
-    : 'Every line of research in flight and how far along it is. <b>Active</b> is the day-to-day list, <b>Done</b> is the archive, and <b>All</b> shows everything by target date.';
+    : 'Every line of research in flight and how far along it is. <b>Active</b> is the day-to-day list, <b>Done</b> holds published projects, and <b>All</b> shows everything by target date.';
   return head(cat === 'QI' ? 'QI Projects' : 'Research Projects', intro, 'Projects', { category: cat }, 'Add project') +
     '<div class="controls">' + seg(view, 'show', [['active', 'Active'], ['done', 'Done'], ['all', 'All']]) +
-    selectFilter(view, 'status', 'Status', distinct(rows, 'status', opts('project_status'))) +
+    selectFilter(view, 'status', 'Status', distinct(rows, 'status', opts('project_status')).concat(rows.some(p => !p.status) || F(view).status === NO_STATUS ? [NO_STATUS] : []), { [NO_STATUS]: 'No status' }) +
     (cat === 'QI' ? '' : selectFilter(view, 'project_group', 'Type', distinct(rows, 'project_group', opts('project_group')))) +
     selectFilter(view, 'focus_area', 'Focus', distinct(rows, 'focus_area', opts('focus_area'))) +
     personFilter(view, rows) +
@@ -767,14 +804,14 @@ function projectsBody(view, cat) {
   }
   let rows = state.data.Projects.filter(p => p.category === cat)
     .filter(p => f.show === 'all' || (f.show === 'done') === DONE_PROJECT.includes(p.status))
-    .filter(p => (!f.status || p.status === f.status) && (!f.project_group || p.project_group === f.project_group) && (!f.focus_area || p.focus_area === f.focus_area))
+    .filter(p => statusMatch(p, f.status) && (!f.project_group || p.project_group === f.project_group) && (!f.focus_area || p.focus_area === f.focus_area))
     .filter(p => !f.person || involves(p, f.person))
     .filter(p => matches(p, f.q, ['title', 'pi', 'lead_fellow', 'lead_resident', 'team', 'notes', 'project_group']));
   if (f.show === 'all') rows.sort((a, b) => byDate('target_date')(a, b) || byText('title')(a, b));
   else rows.sort((a, b) => byDate('next')(state.proj[a.id], state.proj[b.id]) || byText('title')(a, b));
   const cols = [
     ['Project', p => '<div class="title">' + esc(p.title) + (cat === 'QI' && !hasPeople(p) && !DONE_PROJECT.includes(p.status) ? '<span class="badge">Needs owner</span>' : '') + '</div>' +
-      peopleHtml(p)],
+      peopleHtml(p, true)],
     ['Status', p => pill(p.status) || '<span class="muted">None</span>'],
   ];
   if (cat !== 'QI') cols.push(['Type', p => esc(p.project_group)]);
@@ -789,15 +826,29 @@ function projectsBody(view, cat) {
     ['Next due', p => state.proj[p.id].next ? dueCell(state.proj[p.id].next) : '<span class="muted">None</span>', 'nowrap'],
     ['Target', p => p.target_date ? esc(fmtDate(p.target_date)) : '<span class="muted">None</span>', 'nowrap'],
   );
-  if (cat === 'QI') return '<p class="count">' + rows.length + ' shown</p>' + table(cols, rows, editAttrs('Projects'));
+  let count = '<p class="count">' + rows.length + ' shown</p>';
+  if (f.person) {
+    const who = (personRec(f.person) || {}).value || f.person;
+    const theirs = state.data.Projects.filter(p => p.category === cat && involves(p, f.person));
+    const hidden = f.show === 'all' ? 0 : theirs.filter(p => (f.show === 'done') !== DONE_PROJECT.includes(p.status)).length;
+    count = '<div class="person-note"><span>' + (f.show === 'done' ? 'Finished projects' : f.show === 'all' ? 'All projects' : 'Active projects') +
+      ' with <b>' + esc(who) + '</b>: ' + rows.length + (rows.length < theirs.length - hidden ? ' matching the other filters' : '') + '</span>' +
+      (hidden ? '<button type="button" class="btn sm" data-seg="show" data-val="all">Show all ' + (theirs.length) + ' (' + hidden + (f.show === 'done' ? ' active' : ' finished') + ')</button>' : '') +
+      '<button type="button" class="btn sm" data-person="">Clear: everyone</button></div>';
+  }
+  if (f.status && !f.person) {
+    count = '<div class="person-note status-note"><span>' + (f.show === 'done' ? 'Finished' : f.show === 'active' ? 'Active' : 'All') + ' ' + esc(cat) + ' projects with status <b>' +
+      esc(f.status === NO_STATUS ? 'No status' : f.status) + '</b>: ' + rows.length + '</span><button type="button" class="btn sm" data-clear-status="1">Clear: all statuses</button></div>';
+  }
+  if (cat === 'QI') return count + table(cols, rows, editAttrs('Projects'));
 
   // Research: one table per subspecialty, stacked. Unassigned first, then the list order, then any other value.
   const groups = [''].concat(opts('subspecialty'));
-  rows.forEach(p => { if (p.subspecialty && !groups.includes(p.subspecialty)) groups.push(p.subspecialty); });
+  rows.forEach(p => { const g = subspec(p.subspecialty); if (g && !groups.includes(g)) groups.push(g); });
   const filtering = f.q || f.status || f.project_group || f.focus_area || f.person;
   const listed = opts('subspecialty');
-  return '<p class="count">' + rows.length + ' shown</p>' + groups.map(g => {
-    const inGroup = rows.filter(p => (p.subspecialty || '') === g);
+  return count + groups.map(g => {
+    const inGroup = rows.filter(p => subspec(p.subspecialty) === g);
     if (!inGroup.length && filtering) return '';
     return '<section class="subspec"><div class="subspec-head"><h3>' + esc(g || 'Subspecialty not assigned') +
       ' <span class="muted">(' + inGroup.length + ')</span>' +
@@ -815,26 +866,26 @@ function ideasShell() {
   const rows = state.data.Ideas;
   return head('New Ideas', 'Post a research idea for discussion. Newest posts are on top. To join an idea, open it with Edit and add your name under <b>Interested in joining</b>. ' +
     'When an idea has a team, use <b>Start a project</b> to copy it into Research.', 'Ideas', null, 'Post an idea') +
-    '<div class="controls">' + selectFilter('ideas', 'subspecialty', 'Subspecialty', distinct(rows, 'subspecialty', opts('subspecialty'))) +
+    '<div class="controls">' + selectFilter('ideas', 'subspecialty', 'Subspecialty', distinct(rows.map(r => ({ subspecialty: subspec(r.subspecialty) })), 'subspecialty', opts('subspecialty'))) +
     selectFilter('ideas', 'status', 'Status', distinct(rows, 'status', opts('idea_status'))) +
     search('ideas', 'Search ideas or people') + '</div><div id="results"></div>';
 }
 function ideasBody() {
   const f = F('ideas');
   const rows = state.data.Ideas.map((r, i) => Object.assign({ _i: i }, r))
-    .filter(r => (!f.subspecialty || r.subspecialty === f.subspecialty) && (!f.status || r.status === f.status))
+    .filter(r => (!f.subspecialty || subspec(r.subspecialty) === f.subspecialty) && (!f.status || r.status === f.status))
     .filter(r => matches(r, f.q, ['title', 'description', 'posted_by', 'interested', 'data_source', 'subspecialty']))
     .sort((a, b) => String(b.posted_date || '').localeCompare(String(a.posted_date || '')) || b._i - a._i); // newest first; same day: latest posted first
   if (!rows.length) return '<div class="table-wrap"><div class="empty">' + (state.data.Ideas.length ? 'No ideas match.' : 'No ideas posted yet. Be the first.') + '</div></div>';
   const cell = v => v ? esc(v) : '<span class="muted">None</span>';
   return '<p class="count">' + rows.length + ' shown</p>' + rows.map(r => {
-    const preset = { category: 'Research', title: r.title, subspecialty: r.subspecialty || '', project_group: r.project_group || '', notes: r.description || '' };
+    const preset = { category: 'Research', title: r.title, subspecialty: subspec(r.subspecialty), project_group: r.project_group || '', notes: r.description || '' };
     return '<article class="idea card">' +
       '<header class="idea-head"><h3>' + esc(r.title) + '</h3><div class="idea-actions">' +
       '<button class="btn sm" type="button" data-edit="Ideas:' + esc(r.id) + '">Edit</button>' + watchBtn('Ideas', r.id, 'sm') +
       '<button class="btn sm" type="button" data-add="Projects" data-preset="' + esc(JSON.stringify(preset)) + '">Start a project</button></div></header>' +
       '<div class="table-wrap"><table class="idea-meta"><thead><tr><th>Subspecialty</th><th>Study type</th><th>Status</th><th>Posted by</th><th>Date posted</th><th>Data source</th><th>Interested</th></tr></thead>' +
-      '<tbody><tr><td data-label="Subspecialty">' + cell(r.subspecialty) + '</td><td data-label="Study type">' + cell(r.project_group) + '</td>' +
+      '<tbody><tr><td data-label="Subspecialty">' + cell(subspec(r.subspecialty)) + '</td><td data-label="Study type">' + cell(r.project_group) + '</td>' +
       '<td data-label="Status">' + (pill(r.status) || cell('')) + '</td><td data-label="Posted by">' + cell(r.posted_by) + '</td>' +
       '<td data-label="Date posted" class="nowrap">' + (r.posted_date ? esc(fmtDate(r.posted_date)) : cell('')) + '</td>' +
       '<td data-label="Data source">' + cell(r.data_source) + '</td><td data-label="Interested">' + cell(r.interested) + '</td></tr></tbody></table></div>' +
@@ -882,12 +933,85 @@ function allEvents() {
   return d.Deadlines.map(r => ({ tab: 'Deadlines', id: r.id, name: r.name, type: r.type || 'Other', start: r.start_date, end: r.end_date || r.start_date, rec: r }))
     .concat(d.Grants.filter(g => g.deadline).map(g => ({ tab: 'Grants', id: g.id, name: g.name + ' (grant)', type: 'Grant Deadline', start: g.deadline, end: g.deadline, rec: g })));
 }
+// ---------- Calendar file (.ics) for Apple Calendar (iCal), Google Calendar, and Outlook ----------
+// Upcoming items only: conferences, courses, abstract/grant/scholarship deadlines, grant deadlines from the
+// Grants tab, and presentation dates from Submissions. All-day events; the file is a snapshot, so people
+// download it again to pick up changes (same UIDs, so most calendar apps update rather than duplicate).
+const ICS_PRESENTING = ['Accepted', 'Presented'];
+function icsEvents() {
+  const t0 = todayIso();
+  const evs = allEvents().filter(e => e.start && (e.end || e.start) >= t0).map(e => ({
+    uid: e.tab + '-' + e.id, start: e.start, end: e.end || e.start, summary: e.name,
+    desc: [e.type, e.rec.status && 'Status: ' + e.rec.status, e.rec.sponsor && 'Sponsor: ' + e.rec.sponsor,
+      e.rec.team && 'Team: ' + splitNames(e.rec.team).join(', '), e.rec.description].filter(Boolean).join('\n'),
+    url: e.rec.link || '' }));
+  state.data.Submissions.forEach(sb => {
+    if (sb.status === 'Rejected') return;
+    const conf = state.byId[sb.deadline_id];
+    // An explicit presentation date always counts; a linked conference's date counts only once accepted.
+    const pres = sb.presentation_date || (conf && ICS_PRESENTING.includes(sb.status) ? conf.start_date : '');
+    if (!pres || pres < t0) return;
+    evs.push({ uid: 'Submissions-' + sb.id, start: pres, end: pres,
+      summary: 'Presentation: ' + (projTitle(sb.project_id) || 'Project not found') + (venueName(sb) ? ' at ' + venueName(sb) : ''),
+      desc: [sb.kind, sb.status && 'Status: ' + sb.status, sb.presenter && 'Presenter: ' + splitNames(sb.presenter).join(', '), sb.notes].filter(Boolean).join('\n'),
+      url: '' });
+  });
+  return evs.sort((a, b) => a.start.localeCompare(b.start) || a.summary.localeCompare(b.summary));
+}
+function icsText(v) { return String(v || '').replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+function icsDate(d) { return d.replace(/-/g, ''); }
+function icsNextDay(d) { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + 1); return icsDate(iso(x)); }
+// Lines longer than 75 bytes are folded (RFC 5545), without splitting a character.
+function icsFold(line) {
+  const enc = new TextEncoder(), out = [];
+  let cur = '', bytes = 0;
+  for (const ch of line) {
+    const b = enc.encode(ch).length, limit = out.length ? 74 : 75;
+    if (bytes + b > limit) { out.push(cur); cur = ''; bytes = 0; }
+    cur += ch; bytes += b;
+  }
+  out.push(cur);
+  return out.join('\r\n ');
+}
+function buildIcs(evs) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//MORF Research Tracker//Conferences and Deadlines//EN',
+    'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:MORF Conferences & Deadlines'];
+  evs.forEach(e => {
+    lines.push('BEGIN:VEVENT', 'UID:' + e.uid + '@morf-tracker', 'DTSTAMP:' + stamp,
+      'DTSTART;VALUE=DATE:' + icsDate(e.start), 'DTEND;VALUE=DATE:' + icsNextDay(e.end), // all-day end date is exclusive
+      'SUMMARY:' + icsText(e.summary), 'TRANSP:TRANSPARENT');
+    if (e.desc) lines.push('DESCRIPTION:' + icsText(e.desc));
+    if (/^https?:\/\//i.test(e.url)) lines.push('URL:' + e.url);
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  return lines.map(icsFold).join('\r\n') + '\r\n';
+}
+function downloadFile(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type: type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function downloadIcs() {
+  const evs = icsEvents();
+  if (!evs.length) { toast('Nothing upcoming to add to a calendar.', 'error'); return; }
+  downloadFile('MORF-conferences-deadlines-' + todayIso() + '.ics', buildIcs(evs), 'text/calendar;charset=utf-8');
+  toast('Downloaded ' + evs.length + ' upcoming item' + (evs.length === 1 ? '' : 's') + '. Open the file to add them to your calendar.');
+}
+document.addEventListener('click', e => { if (e.target.closest && e.target.closest('[data-ics]')) downloadIcs(); });
+
 function deadlinesShell() {
   F('deadlines', { show: 'upcoming' });
   const types = distinct(state.data.Deadlines, 'type', opts('deadline_type'));
-  return head('Conferences & Deadlines', 'Conference dates, abstract and poster deadlines, scholarships, and courses. Grant deadlines from the Grants tab appear here too.', 'Deadlines', null, 'Add deadline or conference') +
+  return head('Calendar (Conferences & Deadlines)', 'Conference dates, abstract and poster deadlines, scholarships, and courses. Grant deadlines from the Grants tab appear here too. ' +
+    'The <a href="#gantt" data-jump="gantt">Timeline (Gantt chart)</a> is at the bottom of the page.', 'Deadlines', null, 'Add deadline or conference') +
     '<div class="controls">' + seg('deadlines', 'show', [['upcoming', 'Upcoming'], ['past', 'Past'], ['all', 'All']]) +
-    selectFilter('deadlines', 'type', 'Type', types) + search('deadlines', 'Search') + '</div><div id="results"></div>';
+    selectFilter('deadlines', 'type', 'Type', types) + search('deadlines', 'Search') +
+    '<button type="button" class="btn" data-ics="1" title="Download every upcoming conference, deadline, and presentation as a calendar file for Apple Calendar (iCal), Google Calendar, or Outlook">Download to calendar (.ics)</button>' +
+    '</div><div id="results"></div>' + timelineSection();
 }
 function deadlinesBody() {
   const f = F('deadlines'), t0 = todayIso();
@@ -899,17 +1023,68 @@ function deadlinesBody() {
     const isPast = e.start && (e.end || e.start) < t0;
     return f.show === 'past' ? isPast : !isPast;
   });
-  list.sort(f.show === 'past' ? byDate('start', true) : byDate('start'));
+  const sort = sortOf('deadlines');
+  if (sort.dflt) list.sort(f.show === 'past' ? byDate('start', true) : byDate('start'));
+  else {
+    // Blank values go last in either direction; ties fall back to date, then name.
+    const val = { date: e => e.start || '', when: e => e.start || '', name: e => e.name || '', type: e => e.type || '',
+      status: e => e.rec.status || '', team: e => splitNames(e.rec.team).join(', ') };
+    const rank = { type: opts('deadline_type'), status: opts('deadline_status').concat(opts('grant_status')) }[sort.key];
+    const txt = (a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
+    const cmp = (a, b) => {
+      const va = val[sort.key](a), vb = val[sort.key](b);
+      if (!va || !vb) return (!va) - (!vb);
+      let r = rank ? ((rank.indexOf(va) + 1 || 999) - (rank.indexOf(vb) + 1 || 999)) || txt(va, vb) : txt(va, vb);
+      return sort.dir === 'desc' ? -r : r;
+    };
+    list.sort((a, b) => cmp(a, b) || byDate('start')(a, b) || txt(a.name || '', b.name || ''));
+  }
   const cols = [
-    ['Date', e => e.start ? esc(fmtRange(e.start, e.end)) : '<span class="muted">No date</span>', 'nowrap'],
-    ['Name', e => '<span class="title">' + esc(e.name) + '</span>' + linkIcon(e.rec.link) + (e.rec.description ? '<div class="sub">' + esc(e.rec.description) + '</div>' : '')],
-    ['Type', e => typePill(e.type)],
-    ['Status', e => pill(e.rec.status)],
-    ['Team', e => peoplePills(e.rec.team)],
-    ['When', e => e.start ? esc(rel(daysUntil(e.start))) : '', 'nowrap'],
+    ['Date', e => e.start ? esc(fmtRange(e.start, e.end)) : '<span class="muted">No date</span>', 'nowrap', 'date'],
+    ['Name', e => '<div class="name-cell">' + subsToggle(e) + '<div><span class="title">' + esc(e.name) + '</span>' + linkIcon(e.rec.link) +
+      (e.rec.description ? '<div class="sub">' + esc(e.rec.description) + '</div>' : '') + '</div></div>', '', 'name'],
+    ['Type', e => typePill(e.type), '', 'type'],
+    ['Status', e => pill(e.rec.status), '', 'status'],
+    ['Team', e => peoplePills(e.rec.team), '', 'team'],
+    ['When', e => e.start ? esc(rel(daysUntil(e.start))) : '', 'nowrap', 'when'],
   ];
   return calendar(evs.filter(e => e.start)) + '<p class="count">' + list.length + ' shown</p>' +
-    table(cols, list, e => 'data-edit="' + e.tab + ':' + esc(e.id) + '" tabindex="0"' + (e.start && (e.end || e.start) < t0 ? ' class="past"' : ''));
+    table(cols, list, e => 'data-edit="' + e.tab + ':' + esc(e.id) + '" tabindex="0"' +
+      ' class="' + (e.start && (e.end || e.start) < t0 ? 'past' : '') + (subsOpen(e) ? ' subs-open' : '') + '"', sort, subsPanel);
+}
+// ---------- Submissions under a conference (dropdown in the deadlines list) ----------
+// Every Deadlines entry with linked submissions gets the button, and every conference does (so one can be logged from here).
+function linkedSubs(id) {
+  return state.data.Submissions.filter(s => s.deadline_id === id)
+    .sort((a, b) => byDate('presentation_date')(a, b) || String(a.kind || '').localeCompare(String(b.kind || '')) || projTitle(a.project_id).localeCompare(projTitle(b.project_id)));
+}
+function hasSubsMenu(e) { return e.tab === 'Deadlines' && (typeClass(e.type) === 't-conference' || linkedSubs(e.id).length > 0); }
+function subsOpen(e) { return hasSubsMenu(e) && (state.subsOpen || (state.subsOpen = new Set())).has(e.id); }
+function subsToggle(e) {
+  if (!hasSubsMenu(e)) return '<span class="subs-spacer"></span>';
+  const n = linkedSubs(e.id).length, open = subsOpen(e);
+  return '<button type="button" class="subs-toggle' + (open ? ' open' : '') + '" data-subs="' + esc(e.id) + '" aria-expanded="' + open + '" ' +
+    'aria-label="' + (open ? 'Hide' : 'Show') + ' submissions to ' + esc(e.name) + ' (' + n + ')" title="' + (open ? 'Hide' : 'Show') + ' submissions (' + n + ')">' +
+    '<span class="chev" aria-hidden="true">▸</span>' + (n ? '<span class="subs-n">' + n + '</span>' : '') + '</button>';
+}
+function subsWhen(s) {
+  const t0 = todayIso();
+  if (s.presentation_date) return (s.presentation_date < t0 ? 'Presented ' : 'Presents ') + fmtDate(s.presentation_date);
+  if (s.submitted_date) return 'Sent ' + fmtDate(s.submitted_date);
+  return '';
+}
+function subsPanel(e) {
+  if (!subsOpen(e)) return '';
+  const subs = linkedSubs(e.id);
+  const rows = subs.map(s => '<tr class="subs-row" data-edit="Submissions:' + esc(s.id) + '" tabindex="0" title="Edit this submission">' +
+    '<td></td><td><div class="name-cell"><span class="subs-spacer"></span><div><span class="subs-title">' + esc(s.kind ? s.kind + ': ' : '') + esc(projTitle(s.project_id) || 'Project not found') + '</span>' +
+    (s.notes ? '<div class="sub">' + esc(s.notes) + '</div>' : '') + '</div></div></td>' +
+    '<td>' + esc(s.kind || '') + '</td><td>' + (pill(s.status) || '<span class="muted">No status</span>') + '</td>' +
+    '<td>' + peoplePills(s.presenter) + '</td><td class="nowrap">' + esc(subsWhen(s)) + '</td></tr>').join('');
+  const preset = esc(JSON.stringify({ deadline_id: e.id }));
+  return rows + '<tr class="subs-row subs-foot"><td></td><td colspan="5"><div class="name-cell"><span class="subs-spacer"></span><div>' +
+    (subs.length ? '' : '<span class="muted small">No submissions linked to ' + esc(e.name) + ' yet.</span> ') +
+    '<button type="button" class="btn sm" data-add="Submissions" data-preset="' + preset + '">+ Log a submission to ' + esc(e.name) + '</button></div></div></td></tr>';
 }
 function calendar(evs) {
   const m = state.calMonth, y = m.getFullYear(), mo = m.getMonth();
@@ -975,11 +1150,13 @@ function timelineItems() {
   return items;
 }
 
-function timelineShell() {
+// The Gantt chart, shown at the bottom of the Calendar (Conferences & Deadlines) page with its own range and search.
+function timelineSection() {
   F('timeline', { range: 'fit', hide: '' });
-  return head('Timeline', 'A Gantt chart of conferences, courses, abstract and grant deadlines, and every submission from the date it was sent to the date it is presented. Click any bar or name to edit it.', 'Deadlines', null, 'Add deadline or conference') +
+  return '<section class="tl-section" id="gantt"><div class="view-head"><div><h2>Timeline (Gantt chart)</h2>' +
+    '<p>Conferences, courses, abstract and grant deadlines, and every submission from the date it was sent to the date it is presented. Click any bar or name to edit it.</p></div></div>' +
     '<div class="controls">' + seg('timeline', 'range', [['fit', 'Fit all'], ['6', '6 months'], ['12', '12 months'], ['24', '24 months']]) +
-    search('timeline', 'Search') + '</div><div id="results"></div>';
+    search('timeline', 'Search the timeline') + '</div><div id="results-tl"></div></section>';
 }
 
 function timelineBody() {
@@ -1063,7 +1240,7 @@ function timelineBody() {
 // ---------- Grants ----------
 function grantsShell() {
   F('grants', {});
-  return head('Research & Education Grants', 'Name, sponsor, amount, deadline, and description. Deadlines also appear on the Conferences &amp; Deadlines calendar.', 'Grants') +
+  return head('Research & Education Grants', 'Name, sponsor, amount, deadline, and description. Deadlines also appear on the Calendar (Conferences &amp; Deadlines) page.', 'Grants') +
     '<div class="controls">' + selectFilter('grants', 'status', 'Status', distinct(state.data.Grants, 'status', opts('grant_status'))) +
     search('grants', 'Search grants or sponsors') + '</div><div id="results"></div>';
 }
@@ -1108,7 +1285,7 @@ function submissionsBody() {
     ['Kind', s => esc(s.kind)],
     ['Submitted', s => s.submitted_date ? esc(fmtDate(s.submitted_date)) : '<span class="muted">None</span>', 'nowrap'],
     ['Status', s => pill(s.status)],
-    ['Presenter', s => peoplePills(s.presenter)],
+    ['Presenter', s => peoplePills(s.presenter) || '<span class="muted">Not set</span>'],
   ];
   return '<p class="count">' + rows.length + ' shown · ' + esc(counts) + '</p>' + table(cols, rows, editAttrs('Submissions'));
 }
@@ -1214,8 +1391,7 @@ const VIEW_DEF = {
   qi: { shell: () => projectsShell('qi', 'QI'), body: () => projectsBody('qi', 'QI') },
   ideas: { shell: ideasShell, body: ideasBody },
   tasks: { shell: tasksShell, body: tasksBody },
-  deadlines: { shell: deadlinesShell, body: deadlinesBody },
-  timeline: { shell: timelineShell, body: timelineBody },
+  deadlines: { shell: deadlinesShell, body: deadlinesBody, body2: timelineBody },
   grants: { shell: grantsShell, body: grantsBody },
   submissions: { shell: submissionsShell, body: submissionsBody },
   choices: { shell: choicesShell, body: choicesBody },
@@ -1283,6 +1459,7 @@ function openForm(tab, id, preset) {
   const rec = id ? state.byId[id] : null;
   if (id && !rec) { toast('That entry no longer exists.', 'error'); return; }
   const vals = rec ? Object.assign({}, rec) : Object.assign({}, preset || {});
+  if ((tab === 'Projects' || tab === 'Ideas') && vals.subspecialty) vals.subspecialty = subspec(vals.subspecialty);
   if (!rec && tab === 'Tasks' && !vals.status) vals.status = 'To Do';
   if (!rec && tab === 'Submissions' && !vals.status) vals.status = 'Submitted';
   if (!rec && tab === 'Ideas') {
@@ -1310,7 +1487,12 @@ function openForm(tab, id, preset) {
     sch.fields.forEach(f => { record[f.k] = form.elements[f.k].value.trim(); });
     if (tab === 'Options' && record.list === 'people' && !record.role) { toast('Choose a role for this person.', 'error'); form.elements.role.focus(); return; }
     const missing = sch.fields.filter(f => f.req && !record[f.k]);
-    if (missing.length) { toast('Fill in: ' + missing.map(f => f.l).join(', '), 'error'); form.elements[missing[0].k].focus(); return; }
+    const focusField = k => { const pk = form.querySelector('.people[data-people="' + k + '"] .people-add'); (pk || form.elements[k]).focus(); };
+    if (missing.length) { toast('Fill in: ' + missing.map(f => f.l).join(', '), 'error'); focusField(missing[0].k); return; }
+    // A submission needs a presenter picked from the People list (a leftover typed-in name alone is not enough).
+    if (tab === 'Submissions' && !splitNames(record.presenter).some(n => personRec(n))) {
+      toast('Choose who will present from the People list, or add them with "+ Add a new person…".', 'error'); focusField('presenter'); return;
+    }
     if (record.start_date && record.end_date && record.end_date < record.start_date) { toast('The last day is before the first day.', 'error'); return; }
     const btn = form.querySelector('button[type=submit]');
     btn.disabled = true; btn.textContent = 'Saving…';
@@ -1430,7 +1612,43 @@ document.addEventListener('click', e => {
     else { box.querySelector('.newperson').hidden = true; box.querySelector('.np-name').value = ''; }
     return;
   }
-  const t =e.target.closest('[data-close],[data-add],[data-edit],[data-seg],[data-cal],[data-tl],[data-tlsec],[data-watch]');
+  const pf = e.target.closest('[data-person]');
+  if (pf && !pf.closest('#modal-root')) {
+    F(state.view).person = pf.dataset.person;
+    renderResults();
+    const c = document.querySelector('#main .controls');
+    if (c && pf.dataset.person && c.getBoundingClientRect().top < 0) c.scrollIntoView({ block: 'start' });
+    return;
+  }
+  const sg = e.target.closest('[data-status-go]');
+  if (sg) {
+    state.f[sg.dataset.statusGo] = { show: 'all', status: sg.dataset.status };
+    location.hash = sg.dataset.statusGo;
+    return;
+  }
+  if (e.target.closest('[data-clear-status]')) { F(state.view).status = ''; renderView(); return; }
+  const sx = e.target.closest('[data-subs]');
+  if (sx) {
+    const set = state.subsOpen || (state.subsOpen = new Set()), id = sx.dataset.subs;
+    if (set.has(id)) set.delete(id); else set.add(id);
+    renderResults();
+    const again = document.querySelector('[data-subs="' + id + '"]');
+    if (again) again.focus();
+    return;
+  }
+  const so = e.target.closest('[data-sort]');
+  if (so) {
+    const view = so.dataset.fv || state.view, cur = sortOf(view), f = F(view);
+    f.dir = cur.key === so.dataset.sort ? (cur.dir === 'asc' ? 'desc' : 'asc') : 'asc';
+    f.sort = so.dataset.sort;
+    renderResults();
+    const again = document.querySelector('[data-sort="' + f.sort + '"][data-fv="' + view + '"]');
+    if (again) again.focus();
+    return;
+  }
+  const jump = e.target.closest('[data-jump]');
+  if (jump) { e.preventDefault(); const g = document.getElementById(jump.dataset.jump); if (g) g.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+  const t = e.target.closest('[data-close],[data-add],[data-edit],[data-seg],[data-cal],[data-tl],[data-tlsec],[data-watch]');
   if (!t) return;
   if (t.dataset.watch) { const i = t.dataset.watch.indexOf(':'); watchEntry(t.dataset.watch.slice(0, i), t.dataset.watch.slice(i + 1), t); return; }
   if (t.dataset.tl) {
@@ -1448,7 +1666,7 @@ document.addEventListener('click', e => {
   if (t.dataset.close) { if (e.target === t || t.tagName === 'BUTTON') closeModal(); return; }
   if (t.dataset.add) { openForm(t.dataset.add, null, t.dataset.preset ? JSON.parse(t.dataset.preset) : {}); return; }
   if (t.dataset.edit) { const i = t.dataset.edit.indexOf(':'); openForm(t.dataset.edit.slice(0, i), t.dataset.edit.slice(i + 1)); return; }
-  if (t.dataset.seg) { F(state.view)[t.dataset.seg] = t.dataset.val; renderView(); return; }
+  if (t.dataset.seg) { const y = window.scrollY; F(t.dataset.fv || state.view)[t.dataset.seg] = t.dataset.val; renderView(); window.scrollTo(0, y); return; }
   if (t.dataset.cal) {
     const n = Number(t.dataset.cal), m = state.calMonth;
     state.calMonth = n === 0 ? firstOfMonth(new Date()) : new Date(m.getFullYear(), m.getMonth() + n, 1);
@@ -1457,7 +1675,7 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('input', e => {
   const k = e.target.dataset && e.target.dataset.filter;
-  if (k) { F(state.view)[k] = e.target.value; renderResults(); }
+  if (k) { F(e.target.dataset.fv || state.view)[k] = e.target.value; renderResults(); }
 });
 document.addEventListener('change', e => {
   const id = e.target.dataset && e.target.dataset.taskToggle;
