@@ -253,10 +253,12 @@ tr.past td { color: var(--muted); }
 
 /* ---------- Modal ---------- */
 .backdrop { position: fixed; inset: 0; background: rgba(16, 24, 40, .45); display: grid; place-items: center; padding: 1rem; z-index: 20; }
-.modal { background: #fff; border-radius: 12px; width: 100%; max-width: 620px; max-height: calc(100vh - 2rem); display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(16,24,40,.25); }
+.modal { background: #fff; border-radius: 12px; width: 100%; max-width: 620px; max-height: calc(100vh - 2rem); max-height: calc(100dvh - 2rem); overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 20px 50px rgba(16,24,40,.25); }
 .modal header { padding: 1rem 1.2rem .6rem; display: flex; justify-content: space-between; align-items: center; }
 .modal header h2 { margin: 0; font-size: 1.15rem; }
-.modal .form { padding: .4rem 1.2rem 1rem; overflow-y: auto; display: grid; grid-template-columns: 1fr 1fr; gap: .85rem; }
+.modal > form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; } /* lets the fields scroll inside the window */
+.modal .form { padding: .4rem 1.2rem 1rem; overflow-y: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: .85rem; align-content: start; }
+body:has(.backdrop) { overflow: hidden; } /* the page behind stays still while a window is open */
 .modal .form .full { grid-column: 1 / -1; }
 .modal footer { padding: .8rem 1.2rem; border-top: 1px solid var(--line); display: flex; gap: .5rem; align-items: center; }
 .modal footer .spacer { flex: 1; }
