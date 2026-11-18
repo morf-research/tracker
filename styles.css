@@ -436,3 +436,38 @@ tr.subs-foot .muted { margin-right: .5rem; }
 /* Conference location */
 .sub.loc { color: var(--muted); }
 .sub.loc .loc-label { font-weight: 600; }
+/* Reset filters */
+.controls .reset-btn { white-space: nowrap; }
+.controls .reset-btn[disabled] { opacity: .45; cursor: default; }
+/* Related submissions under a project */
+tr.proj-subs > td { padding: .5rem .75rem .75rem; }
+.rel-subs { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: .5rem .6rem; overflow-x: auto; }
+.rel-head { display: flex; align-items: center; gap: .5rem; margin-bottom: .4rem; }
+.rel-head .btn { margin-left: auto; }
+table.rel-table { font-size: .86rem; }
+table.rel-table th { background: #fbfcfd; }
+table.rel-table td, table.rel-table th { padding: .4rem .55rem; }
+table.rel-table tr[data-edit]:hover td { background: #edf2f9; }
+table.rel-table tr[data-edit]:hover .subs-title { text-decoration: underline; }
+.rel-empty { margin: .2rem 0 .3rem; }
+.rel-subs-form { border-top: 1px solid var(--line); padding-top: .6rem; }
+.rel-subs-form .rel-list { list-style: none; margin: .3rem 0 .5rem; padding: 0; display: grid; gap: .3rem; }
+.rel-subs-form .rel-list li { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.rel-subs-form .rel-hint { margin: .4rem 0 0; }
+.modal header .back-note { margin-right: auto; margin-left: .6rem; }
+.rel-subs-form .rel-list .linkish { border: 0; background: none; padding: 0; font: inherit; font-weight: 600; color: var(--accent); cursor: pointer; text-align: left; }
+.rel-subs-form .rel-list .linkish:hover, .rel-subs-form .rel-list .linkish:focus-visible { text-decoration: underline; }
+/* Pinned links at the top of New Ideas */
+.pinned { margin-bottom: 1rem; border-left: 4px solid var(--accent); display: grid; gap: .6rem; }
+.pin { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; }
+.pin + .pin { border-top: 1px solid var(--line); padding-top: .6rem; }
+.pin-main { flex: 1 1 18rem; min-width: 0; }
+.pin-tag { display: inline-block; font-size: .7rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: .1rem .5rem; margin-right: .5rem; vertical-align: middle; }
+.pin-title { font-weight: 700; font-size: 1.02rem; color: var(--accent); }
+a.pin-title:hover { text-decoration: underline; }
+.pin-note { color: var(--muted); font-size: .88rem; margin-top: .2rem; }
+.pin-actions { display: flex; gap: .4rem; }
+.pin-admin { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.pin-admin .btn { margin-left: auto; }
+.pin-actions a.btn { text-decoration: none; }
+.idea-text a { color: var(--accent); overflow-wrap: anywhere; }

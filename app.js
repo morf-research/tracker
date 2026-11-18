@@ -44,7 +44,10 @@ const NEW_CHOICE = '__new__';
 const PEOPLE_FIELDS = { Projects: ['pi', 'lead_fellow', 'lead_resident', 'team'], Tasks: ['assignee'], Deadlines: ['team'], Submissions: ['presenter'] };
 const PEOPLE_COLORS = ['blue', 'indigo', 'purple', 'magenta', 'pink', 'red', 'orange', 'amber', 'lime', 'green', 'teal', 'brown', 'grey'];
 const PEOPLE_ROLES = ['PI', 'Research fellow', 'Resident', 'Student', 'Other'];
-const ROLE_GROUP = { 'PI': 'PIs', 'Research fellow': 'Research fellows', 'Resident': 'Residents', 'Student': 'Students', 'Other': 'Other', '': 'Role not set' };
+// The stored role "PI" is shown as "Attending"; the Sheet keeps "PI", so existing people keep their role.
+const ROLE_LABEL = { 'PI': 'Attending' };
+function roleLabel(r) { return ROLE_LABEL[r] || r; }
+const ROLE_GROUP = { 'PI': 'Attendings', 'Research fellow': 'Research fellows', 'Resident': 'Residents', 'Student': 'Students', 'Other': 'Other', '': 'Role not set' };
 // The role a field asks for: its dropdown lists that role first, and a person added there gets it by default.
 const FIELD_ROLE = { pi: 'PI', lead_fellow: 'Research fellow', lead_resident: 'Resident' };
 const COLOR_LABEL = { blue: 'Blue', indigo: 'Indigo', purple: 'Purple', magenta: 'Magenta', pink: 'Pink', red: 'Red', orange: 'Orange', amber: 'Gold', lime: 'Lime', green: 'Green', teal: 'Teal', brown: 'Brown', grey: 'Grey' };
@@ -167,6 +170,18 @@ function safeUrl(u) {
   if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
   try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch (e) { return ''; }
 }
+// Text with web addresses turned into links (everything else escaped). Trailing punctuation stays outside the link.
+function linkify(text) {
+  const s = String(text || ''), re = /https?:\/\/[^\s<>"']+/gi;
+  let out = '', last = 0, m;
+  while ((m = re.exec(s))) {
+    const trail = (m[0].match(/[).,;:!?\]]+$/) || [''])[0], url = m[0].slice(0, m[0].length - trail.length), u = safeUrl(url);
+    out += esc(s.slice(last, m.index)) + (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(url) + '</a>' : esc(url));
+    last = m.index + url.length;
+    re.lastIndex = last;
+  }
+  return out + esc(s.slice(last));
+}
 function parseDate(s) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || '');
   return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
@@ -213,6 +228,7 @@ function distinct(rows, k, base = []) {
 // Built-in choices for a dropdown plus any an admin has added (Options tab), without repeats,
 // in the order an admin saved for that list (choices not in the saved order keep their place at the end).
 const ORDER_LIST = '_order'; // must match ORDER_LIST in Code.gs
+const PIN_LIST = '_pin';     // links an admin pins to the top of New Ideas (Options rows); must match PIN_LIST in Code.gs
 function opts(list) {
   const out = OPT[list].slice(), seen = new Set(out.map(v => v.toLowerCase()));
   customChoices(list).forEach(o => {
@@ -300,7 +316,20 @@ function watchBtn(tab, id, cls) {
     (isWatched(tab, id) ? 'Following ✓' : 'Email me updates') + '</button>';
 }
 function projTitle(id) { const p = state.byId[id]; return p ? p.title : ''; }
-function F(view, defaults) { return state.f[view] || (state.f[view] = Object.assign({}, defaults)); }
+function F(view, defaults) {
+  const fd = state.fd || (state.fd = {});
+  if (defaults && !fd[view]) fd[view] = Object.assign({}, defaults);
+  return state.f[view] || (state.f[view] = Object.assign({}, defaults));
+}
+// A view's filters differ from its defaults (search, dropdowns, Active/Done, sort, chart range or position).
+function isFiltered(view) {
+  const f = state.f[view] || {}, d = (state.fd || {})[view] || {};
+  if (view === 'timeline' && state.tlOffset) return true;
+  return Object.keys(Object.assign({}, f, d)).some(k => String(f[k] == null ? '' : f[k]) !== String(d[k] == null ? '' : d[k]));
+}
+function resetBtn(view) {
+  return '<button type="button" class="btn reset-btn" data-reset="' + view + '" title="Clear the search and every filter on this list">Reset filters</button>';
+}
 function toast(msg, kind) {
   const t = document.createElement('div');
   t.className = 'toast ' + (kind || '');
@@ -411,10 +440,18 @@ async function demoApi(action, p) {
       try { arr = o.order ? JSON.parse(o.order) : []; } catch (e) { throw apiError('bad_request', 'The new order could not be read.'); }
       if (!Array.isArray(arr) || arr.length > 200 || arr.some(v => typeof v !== 'string' || !v.trim() || v.length > 80)) throw apiError('bad_request', 'The new order could not be read.');
       if (rows.some(x => x.id !== selfId && String(x.archived).toUpperCase() !== 'TRUE' && x.list === ORDER_LIST && x.value === o.value)) throw apiError('bad_request', 'That list already has a saved order. Reload and try again.');
-      o.order = JSON.stringify(arr.map(v => v.trim())); o.color = ''; o.role = '';
+      o.order = JSON.stringify(arr.map(v => v.trim())); o.color = ''; o.role = ''; o.link = ''; o.note = '';
       return;
     }
-    o.order = '';
+    if (o.list === PIN_LIST) { // same as checkPin_ in Code.gs
+      if (!o.value) throw apiError('bad_request', 'Enter a title for the pinned link.');
+      if (o.value.length > 80) throw apiError('bad_request', 'Keep the title under 80 characters.');
+      const u = String(o.link || '').trim();
+      if (!/^https:\/\/[^\s]+$/i.test(u) || u.length > 2000) throw apiError('bad_request', 'Enter the full link, starting with https://');
+      o.link = u; o.note = String(o.note || '').slice(0, 300); o.color = ''; o.role = ''; o.order = '';
+      return;
+    }
+    o.order = ''; o.link = ''; o.note = '';
     if (!LIST_LABELS[o.list]) throw apiError('bad_request', 'That dropdown list cannot be changed.');
     if (!o.value) throw apiError('bad_request', 'Enter the new choice.');
     if (rows.some(x => x.id !== selfId && String(x.archived).toUpperCase() !== 'TRUE' && x.list === o.list && x.value.toLowerCase() === o.value.toLowerCase())) {
@@ -428,13 +465,14 @@ async function demoApi(action, p) {
   };
   const clean = rec => {
     const o = {};
-    SCHEMA[p.tab].fields.map(f => f.k).concat(p.tab === 'Options' ? ['order'] : []).forEach(k => { if (rec && k in rec) o[k] = String(rec[k] == null ? '' : rec[k]).trim(); });
+    SCHEMA[p.tab].fields.map(f => f.k).concat(p.tab === 'Options' ? ['order', 'link', 'note'] : []).forEach(k => { if (rec && k in rec) o[k] = String(rec[k] == null ? '' : rec[k]).trim(); });
     return o;
   };
   const now = new Date().toISOString();
   if (action === 'create') {
     const rec = clean(p.record);
     if (p.tab === 'Options' && rec.list === ORDER_LIST && state.role !== 'admin') throw apiError('forbidden', 'Only an admin can change the order of a dropdown list.');
+    if (p.tab === 'Options' && rec.list === PIN_LIST && state.role !== 'admin') throw apiError('forbidden', 'Only an admin can pin a link.');
     if (p.tab === 'Options') checkOption(rec, null);
     const r = Object.assign(rec, { id: p.tab[0].toLowerCase() + Math.random().toString(16).slice(2, 10), updated_at: now, updated_by: state.name, archived: '' });
     rows.push(r);
@@ -646,6 +684,9 @@ function renderResults() {
   if (el) el.innerHTML = VIEW_DEF[state.view].body();
   const el2 = $('#results-tl'), b2 = VIEW_DEF[state.view].body2;
   if (el2 && b2) el2.innerHTML = b2();
+  const el3 = $('#results-top'), b3 = VIEW_DEF[state.view].top;
+  if (el3 && b3) el3.innerHTML = b3();
+  document.querySelectorAll('#main [data-reset]').forEach(b => { b.disabled = !isFiltered(b.dataset.reset); });
 }
 
 function head(title, text, addTab, preset, addLabel) {
@@ -667,6 +708,15 @@ function selectFilter(view, key, label, values, names) {
     values.map(v => '<option value="' + esc(v) + '"' + (v === cur ? ' selected' : '') + '>' + esc((names && names[v]) || v) + '</option>').join('') + '</select>';
 }
 const NO_STATUS = '__none__'; // status filter value for projects with no status set
+const NO_SUBSPEC = '__none__'; // subspecialty filter value for projects with no subspecialty
+// Subspecialty filter: the current list (in the admin's order), any older value still on a project, and "not assigned".
+function subspecChoices(rows, cur) {
+  const out = opts('subspecialty').slice();
+  rows.forEach(p => { const g = subspec(p.subspecialty); if (g && !out.includes(g)) out.push(g); });
+  if (cur && cur !== NO_SUBSPEC && !out.includes(cur)) out.push(cur);
+  return out.concat([NO_SUBSPEC]);
+}
+function subspecMatch(p, v) { return !v || (v === NO_SUBSPEC ? !subspec(p.subspecialty) : subspec(p.subspecialty) === v); }
 function statusMatch(p, st) { return !st || (st === NO_STATUS ? !p.status : p.status === st); }
 function projectFilter(view, rows) {
   const cur = F(view).project || '';
@@ -812,10 +862,11 @@ function projectsShell(view, cat) {
   return head(cat === 'QI' ? 'QI Projects' : 'Research Projects', intro, 'Projects', { category: cat }, 'Add project') +
     '<div class="controls">' + seg(view, 'show', [['active', 'Active'], ['done', 'Done'], ['all', 'All']]) +
     selectFilter(view, 'status', 'Status', distinct(rows, 'status', opts('project_status')).concat(rows.some(p => !p.status) || F(view).status === NO_STATUS ? [NO_STATUS] : []), { [NO_STATUS]: 'No status' }) +
-    (cat === 'QI' ? '' : selectFilter(view, 'project_group', 'Type', distinct(rows, 'project_group', opts('project_group')))) +
-    selectFilter(view, 'focus_area', 'Focus', distinct(rows, 'focus_area', opts('focus_area'))) +
+    (cat === 'QI' ? selectFilter(view, 'focus_area', 'Focus', distinct(rows, 'focus_area', opts('focus_area')))
+      : selectFilter(view, 'subspecialty', 'Subspecialty', subspecChoices(rows, F(view).subspecialty), { [NO_SUBSPEC]: 'Subspecialty not assigned' }) +
+        selectFilter(view, 'project_group', 'Type', distinct(rows, 'project_group', opts('project_group')))) +
     personFilter(view, rows) +
-    search(view, 'Search projects or team') + '</div><div id="results"></div>';
+    search(view, 'Search projects or team') + resetBtn(view) + '</div><div id="results"></div>';
 }
 function projectsBody(view, cat) {
   const f = F(view);
@@ -827,14 +878,15 @@ function projectsBody(view, cat) {
   }
   let rows = state.data.Projects.filter(p => p.category === cat)
     .filter(p => f.show === 'all' || (f.show === 'done') === DONE_PROJECT.includes(p.status))
-    .filter(p => statusMatch(p, f.status) && (!f.project_group || p.project_group === f.project_group) && (!f.focus_area || p.focus_area === f.focus_area))
+    .filter(p => statusMatch(p, f.status) && (!f.project_group || p.project_group === f.project_group))
+    .filter(p => cat === 'QI' ? (!f.focus_area || p.focus_area === f.focus_area) : subspecMatch(p, f.subspecialty))
     .filter(p => !f.person || involves(p, f.person))
     .filter(p => matches(p, f.q, ['title', 'pi', 'lead_fellow', 'lead_resident', 'team', 'notes', 'project_group']));
   if (f.show === 'all') rows.sort((a, b) => byDate('target_date')(a, b) || byText('title')(a, b));
   else rows.sort((a, b) => byDate('next')(state.proj[a.id], state.proj[b.id]) || byText('title')(a, b));
   const cols = [
-    ['Project', p => '<div class="title">' + esc(p.title) + (cat === 'QI' && !hasPeople(p) && !DONE_PROJECT.includes(p.status) ? '<span class="badge">Needs owner</span>' : '') + '</div>' +
-      peopleHtml(p, true)],
+    ['Project', p => '<div class="name-cell">' + projSubsToggle(p) + '<div><div class="title">' + esc(p.title) + (cat === 'QI' && !hasPeople(p) && !DONE_PROJECT.includes(p.status) ? '<span class="badge">Needs owner</span>' : '') + '</div>' +
+      peopleHtml(p, true) + '</div></div>'],
     ['Status', p => pill(p.status) || '<span class="muted">None</span>'],
   ];
   if (cat !== 'QI') cols.push(['Type', p => esc(p.project_group)]);
@@ -863,12 +915,13 @@ function projectsBody(view, cat) {
     count = '<div class="person-note status-note"><span>' + (f.show === 'done' ? 'Finished' : f.show === 'active' ? 'Active' : 'All') + ' ' + esc(cat) + ' projects with status <b>' +
       esc(f.status === NO_STATUS ? 'No status' : f.status) + '</b>: ' + rows.length + '</span><button type="button" class="btn sm" data-clear-status="1">Clear: all statuses</button></div>';
   }
-  if (cat === 'QI') return count + table(cols, rows, editAttrs('Projects'));
+  const rowAttrs = editAttrs('Projects', p => projSubsOpen(p) ? 'subs-open' : ''), panel = p => projSubsPanel(p, cols.length);
+  if (cat === 'QI') return count + table(cols, rows, rowAttrs, null, panel);
 
   // Research: one table per subspecialty, stacked. Unassigned first, then the list order, then any other value.
   const groups = [''].concat(opts('subspecialty'));
   rows.forEach(p => { const g = subspec(p.subspecialty); if (g && !groups.includes(g)) groups.push(g); });
-  const filtering = f.q || f.status || f.project_group || f.focus_area || f.person;
+  const filtering = f.q || f.status || f.project_group || f.subspecialty || f.person;
   const listed = opts('subspecialty');
   return count + groups.map(g => {
     const inGroup = rows.filter(p => subspec(p.subspecialty) === g);
@@ -877,10 +930,60 @@ function projectsBody(view, cat) {
       ' <span class="muted">(' + inGroup.length + ')</span>' +
       (g && !listed.includes(g) ? ' <span class="small muted legacy">no longer a subspecialty choice; edit these projects to pick a current one</span>' : '') + '</h3>' +
       (!g || listed.includes(g) ? addBtn('Projects', { category: cat, subspecialty: g }, 'Add') : '') + '</div>' +
-      (inGroup.length ? table(cols, inGroup, editAttrs('Projects'))
+      (inGroup.length ? table(cols, inGroup, rowAttrs, null, panel)
         : '<div class="table-wrap"><div class="empty sm">' + (f.show === 'done' ? 'No finished projects.' : f.show === 'all' ? 'No projects.' : 'No active projects.') + '</div></div>') +
       '</section>';
   }).join('');
+}
+
+// ---------- Related submissions (dropdown under each project; the same entries as the Submissions tab) ----------
+function projSubs(id) {
+  return state.data.Submissions.filter(s => s.project_id === id)
+    .sort((a, b) => byDate('submitted_date', true)(a, b) || String(a.kind || '').localeCompare(String(b.kind || '')));
+}
+function projSubsOpen(p) { return (state.projSubsOpen || (state.projSubsOpen = new Set())).has(p.id); }
+function projSubsToggle(p) {
+  const n = projSubs(p.id).length, open = projSubsOpen(p);
+  return '<button type="button" class="subs-toggle' + (open ? ' open' : '') + '" data-psubs="' + esc(p.id) + '" aria-expanded="' + open + '" ' +
+    'aria-label="' + (open ? 'Hide' : 'Show') + ' related submissions for ' + esc(p.title) + ' (' + n + ')" title="' + (open ? 'Hide' : 'Show') + ' related submissions (' + n + ')">' +
+    '<span class="chev" aria-hidden="true">▸</span>' + (n ? '<span class="subs-n">' + n + '</span>' : '') + '</button>';
+}
+function subVenue(s) { return venueName(s) || ''; }
+function projSubsPanel(p, ncols) {
+  if (!projSubsOpen(p)) return '';
+  const subs = projSubs(p.id), t0 = todayIso();
+  const list = subs.length ? '<table class="rel-table"><thead><tr><th>Kind</th><th>Conference or journal</th><th>Status</th><th>Presenter</th><th>Submitted</th><th>Presentation</th></tr></thead><tbody>' +
+    subs.map(s => '<tr data-edit="Submissions:' + esc(s.id) + '" tabindex="0" title="Edit this submission">' +
+      '<td><span class="subs-title">' + esc(s.kind || 'Submission') + '</span></td>' +
+      '<td>' + (subVenue(s) ? esc(subVenue(s)) : '<span class="muted">Not set</span>') + (s.notes ? '<div class="sub">' + esc(s.notes) + '</div>' : '') + '</td>' +
+      '<td>' + (pill(s.status) || '<span class="muted">No status</span>') + '</td>' +
+      '<td>' + (peoplePills(s.presenter) || '<span class="muted">Not set</span>') + '</td>' +
+      '<td class="nowrap">' + (s.submitted_date ? esc(fmtDate(s.submitted_date)) : '<span class="muted">None</span>') + '</td>' +
+      '<td>' + (s.presentation_date ? esc((s.presentation_date < t0 ? 'Presented ' : 'Presents ') + fmtDate(s.presentation_date)) : '<span class="muted">None</span>') + '</td></tr>').join('') +
+    '</tbody></table>' : '<p class="muted small rel-empty">No related submissions yet.</p>';
+  return '<tr class="subs-row proj-subs"><td colspan="' + ncols + '"><div class="rel-subs"><div class="rel-head"><b>Related submissions</b> <span class="muted">(' + subs.length + ')</span>' +
+    '<button type="button" class="btn sm" data-add="Submissions" data-preset="' + esc(JSON.stringify({ project_id: p.id })) + '">+ Add related submission</button></div>' + list + '</div></td></tr>';
+}
+// The same list inside the project's edit form.
+function relSubsFormHtml(rec) {
+  if (!rec) return '<div class="full rel-subs-form"><span class="flabel">Related submissions</span><p class="muted small">Save the project first, then add its submissions here.</p></div>';
+  const subs = projSubs(rec.id);
+  return '<div class="full rel-subs-form"><span class="flabel">Related submissions (' + subs.length + ')</span>' +
+    (subs.length ? '<ul class="rel-list">' + subs.map(s => '<li><button type="button" class="linkish" data-relsub-open="' + esc(s.id) + '">' + esc([s.kind || 'Submission', subVenue(s)].filter(Boolean).join(': ')) + '</button> ' +
+      (pill(s.status) || '') + (s.presenter ? ' <span class="muted small">' + esc(splitNames(s.presenter).join(', ')) + '</span>' : '') + '</li>').join('') + '</ul>'
+      : '<p class="muted small">No related submissions yet.</p>') +
+    '<button type="button" class="btn sm" data-relsub-add="1">+ Add related submission</button>' +
+    '<p class="muted small rel-hint">Related submissions are the same entries as the Submissions tab.</p></div>';
+}
+function formSnapshot(form, tab) { return SCHEMA[tab].fields.map(f => (form.elements[f.k] || {}).value || '').join('\u0001'); }
+// From the project form: open a submission (new or existing), then come back to the project when it closes.
+function openRelatedSub(subId) {
+  const form = $('#rec-form');
+  if (!form || form.dataset.tab !== 'Projects') return;
+  if (formSnapshot(form, 'Projects') !== form.dataset.initial) { toast('Save your changes to this project first, then open its submissions.', 'error'); return; }
+  const back = { tab: 'Projects', id: form.dataset.id };
+  if (subId) openForm('Submissions', subId, null, { returnTo: back });
+  else openForm('Submissions', null, { project_id: back.id }, { returnTo: back });
 }
 
 // ---------- New Ideas (discussion board, newest first) ----------
@@ -888,10 +991,66 @@ function ideasShell() {
   F('ideas', {});
   const rows = state.data.Ideas;
   return head('New Ideas', 'Post a research idea for discussion. Newest posts are on top. To join an idea, open it with Edit and add your name under <b>Interested in joining</b>. ' +
-    'When an idea has a team, use <b>Start a project</b> to copy it into Research.', 'Ideas', null, 'Post an idea') +
+    'When an idea has a team, use <b>Start a project</b> to copy it into Research.', 'Ideas', null, 'Post an idea') + '<div id="results-top"></div>' +
     '<div class="controls">' + selectFilter('ideas', 'subspecialty', 'Subspecialty', distinct(rows.map(r => ({ subspecialty: subspec(r.subspecialty) })), 'subspecialty', opts('subspecialty'))) +
     selectFilter('ideas', 'status', 'Status', distinct(rows, 'status', opts('idea_status'))) +
-    search('ideas', 'Search ideas or people') + '</div><div id="results"></div>';
+    search('ideas', 'Search ideas or people') + resetBtn('ideas') + '</div><div id="results"></div>';
+}
+function pinnedHtml() {
+  const admin = state.role === 'admin';
+  const pins = customChoices(PIN_LIST).slice().sort((a, b) => String(a.updated_at || '').localeCompare(String(b.updated_at || '')));
+  if (!pins.length && !admin) return '';
+  const cards = pins.map(p => {
+    const u = safeUrl(p.link);
+    return '<div class="pin" data-pin="' + esc(p.id) + '"><div class="pin-main"><span class="pin-tag">Pinned</span>' +
+      (u ? '<a class="pin-title" href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(p.value) + ' ↗</a>' : '<span class="pin-title">' + esc(p.value) + '</span>') +
+      (p.note ? '<div class="pin-note">' + esc(p.note) + '</div>' : '') + '</div><div class="pin-actions">' +
+      (u ? '<a class="btn primary sm" href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Open</a>' : '') +
+      (admin ? '<button type="button" class="btn sm" data-pin-edit="' + esc(p.id) + '">Edit</button>' : '') + '</div></div>';
+  }).join('');
+  return '<section class="pinned card" aria-label="Pinned links">' + cards +
+    (admin ? '<div class="pin-admin">' + (pins.length ? '' : '<span class="muted small">Admin: pin a link here for everyone, for example the TriNetX ideas sheet (matrix of procedures and comorbidities).</span>') +
+      '<button type="button" class="btn sm" data-pin-edit="">+ Add pinned link</button></div>' : '') + '</section>';
+}
+function openPinForm(id) {
+  if (state.role !== 'admin') return;
+  const rec = id ? state.byId[id] : null;
+  if (id && !rec) { toast('That link no longer exists.', 'error'); return; }
+  state.modalReturn = null;
+  $('#modal-root').innerHTML =
+    '<div class="backdrop" data-close="1"><div class="modal" role="dialog" aria-modal="true" aria-label="Pinned link">' +
+    '<header><h2>' + (rec ? 'Edit pinned link' : 'Add pinned link') + '</h2><button class="xbtn" type="button" data-close="1" aria-label="Close">×</button></header>' +
+    '<form id="pin-form" novalidate><div class="form">' +
+    '<label class="full" for="pin-title">Title <span class="req">*</span><input id="pin-title" name="value" maxlength="80" value="' + esc(rec ? rec.value : '') + '" placeholder="e.g., TriNetX ideas: matrix of procedures and comorbidities"></label>' +
+    '<label class="full" for="pin-link">Link <span class="req">*</span><input id="pin-link" name="link" type="url" maxlength="2000" value="' + esc(rec ? rec.link : '') + '" placeholder="https://docs.google.com/spreadsheets/d/…"></label>' +
+    '<label class="full" for="pin-note">Short description<input id="pin-note" name="note" maxlength="300" value="' + esc(rec ? rec.note : '') + '" placeholder="e.g., Pick an open procedure and comorbidity pair, then post the idea below."></label>' +
+    '<p class="muted small full">Shown at the top of New Ideas for everyone who is logged in. The link is stored in the Sheet, not in the public website code. ' +
+    'Make sure the Google Sheet itself is shared with the people who should open it.</p></div>' +
+    '<footer>' + (rec ? '<button class="btn danger" type="button" id="pin-del">Remove</button>' : '') + '<span class="spacer"></span>' +
+    '<button class="btn" type="button" data-close="1">Cancel</button><button class="btn primary" type="submit">Save</button></footer></form></div></div>';
+  const form = $('#pin-form');
+  form.elements.value.focus();
+  form.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const record = { list: PIN_LIST, value: form.elements.value.value.trim(), link: form.elements.link.value.trim(), note: form.elements.note.value.trim() };
+    if (!record.value) { toast('Enter a title for the pinned link.', 'error'); form.elements.value.focus(); return; }
+    if (!/^https:\/\/\S+$/i.test(record.link)) { toast('Enter the full link, starting with https://', 'error'); form.elements.link.focus(); return; }
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true; state.busy = true;
+    try {
+      const j = rec ? await api('update', { tab: 'Options', id: rec.id, record: record, expected_updated_at: rec.updated_at }) : await api('create', { tab: 'Options', record: record });
+      closeModal(); applySaved('Options', j.record, j.version); toast('Pinned link saved.');
+    } catch (e) {
+      if (e.code === 'conflict' || e.code === 'not_found') { closeModal(); toast(e.message, 'error'); loadData(); } else { btn.disabled = false; handleError(e); }
+    } finally { state.busy = false; }
+  });
+  const del = $('#pin-del');
+  if (del) del.addEventListener('click', async () => {
+    if (!confirm('Remove the pinned link "' + rec.value + '"? An admin can restore it from the Sheet.')) return;
+    del.disabled = true; state.busy = true;
+    try { const j = await api('archive', { tab: 'Options', id: rec.id }); closeModal(); applySaved('Options', rec, j.version, true); toast('Pinned link removed.'); }
+    catch (e) { del.disabled = false; handleError(e); } finally { state.busy = false; }
+  });
 }
 function ideasBody() {
   const f = F('ideas');
@@ -912,7 +1071,7 @@ function ideasBody() {
       '<td data-label="Status">' + (pill(r.status) || cell('')) + '</td><td data-label="Posted by">' + cell(r.posted_by) + '</td>' +
       '<td data-label="Date posted" class="nowrap">' + (r.posted_date ? esc(fmtDate(r.posted_date)) : cell('')) + '</td>' +
       '<td data-label="Data source">' + cell(r.data_source) + '</td><td data-label="Interested">' + cell(r.interested) + '</td></tr></tbody></table></div>' +
-      '<div class="idea-text">' + (r.description ? esc(r.description) : '<span class="muted">No description yet.</span>') + '</div>' +
+      '<div class="idea-text">' + (r.description ? linkify(r.description) : '<span class="muted">No description yet.</span>') + '</div>' +
       (r.updated_by && r.updated_by !== r.posted_by ? '<p class="muted small idea-foot">Last edited by ' + esc(r.updated_by) + (r.updated_at ? ', ' + esc(fmtStamp(r.updated_at)) : '') + '</p>' : '') +
       '</article>';
   }).join('');
@@ -925,7 +1084,7 @@ function tasksShell() {
   return head('Research Tasks', 'The individual pieces of work that move each project forward. Give a task a project and a due date, and the project\'s progress bar and next due date follow on their own.', 'Tasks') +
     '<div class="controls">' + seg('tasks', 'show', [['open', 'Open'], ['done', 'Done'], ['all', 'All']]) +
     projectFilter('tasks', rows) + selectFilter('tasks', 'type', 'Type', distinct(rows, 'type', opts('task_type'))) +
-    search('tasks', 'Search tasks or people') + '</div><div id="results"></div>';
+    search('tasks', 'Search tasks or people') + resetBtn('tasks') + '</div><div id="results"></div>';
 }
 function tasksBody() {
   const f = F('tasks');
@@ -1035,7 +1194,7 @@ function deadlinesShell() {
     '<div class="controls">' + seg('deadlines', 'show', [['upcoming', 'Upcoming'], ['past', 'Past'], ['all', 'All']]) +
     selectFilter('deadlines', 'type', 'Type', types) + search('deadlines', 'Search') +
     '<button type="button" class="btn" data-ics="1" title="Download every upcoming conference, deadline, and presentation as a calendar file for Apple Calendar (iCal), Google Calendar, or Outlook">Download to calendar (.ics)</button>' +
-    '</div><div id="results"></div>' + timelineSection();
+    resetBtn('deadlines') + '</div><div id="results"></div>' + timelineSection();
 }
 function deadlinesBody() {
   const f = F('deadlines'), t0 = todayIso();
@@ -1181,7 +1340,7 @@ function timelineSection() {
   return '<section class="tl-section" id="gantt"><div class="view-head"><div><h2>Timeline (Gantt chart)</h2>' +
     '<p>Conferences, courses, abstract and grant deadlines, and every submission from the date it was sent to the date it is presented. Click any bar or name to edit it.</p></div></div>' +
     '<div class="controls">' + seg('timeline', 'range', [['fit', 'Fit all'], ['6', '6 months'], ['12', '12 months'], ['24', '24 months']]) +
-    search('timeline', 'Search the timeline') + '</div><div id="results-tl"></div></section>';
+    search('timeline', 'Search the timeline') + resetBtn('timeline') + '</div><div id="results-tl"></div></section>';
 }
 
 function timelineBody() {
@@ -1267,7 +1426,7 @@ function grantsShell() {
   F('grants', {});
   return head('Research & Education Grants', 'Name, sponsor, amount, deadline, and description. Deadlines also appear on the Calendar (Conferences &amp; Deadlines) page.', 'Grants') +
     '<div class="controls">' + selectFilter('grants', 'status', 'Status', distinct(state.data.Grants, 'status', opts('grant_status'))) +
-    search('grants', 'Search grants or sponsors') + '</div><div id="results"></div>';
+    search('grants', 'Search grants or sponsors') + resetBtn('grants') + '</div><div id="results"></div>';
 }
 function grantsBody() {
   const f = F('grants');
@@ -1295,7 +1454,7 @@ function submissionsShell() {
   return head('Submissions', 'Every abstract, poster, podium, and manuscript sent out, and how it turned out. Update the status when you hear back.', 'Submissions', null, 'Log submission') +
     '<div class="controls">' + selectFilter('submissions', 'status', 'Status', distinct(rows, 'status', opts('sub_status'))) +
     selectFilter('submissions', 'kind', 'Kind', distinct(rows, 'kind', opts('sub_kind'))) + projectFilter('submissions', rows) +
-    search('submissions', 'Search venue or presenter') + '</div><div id="results"></div>';
+    search('submissions', 'Search venue or presenter') + resetBtn('submissions') + '</div><div id="results"></div>';
 }
 function submissionsBody() {
   const f = F('submissions');
@@ -1452,7 +1611,7 @@ async function addPersonFromForm(box) {
   const done = n => { pickPerson(box, n); panel.hidden = true; input.value = ''; };
   const existing = personRec(name);
   if (existing) { done(existing.value); toast(existing.value + ' is already in the People list, so they were selected.'); return; }
-  if (!role) { toast('Choose a role for ' + name + ': PI, research fellow, resident, student, or other.', 'error'); roleSel.focus(); return; }
+  if (!role) { toast('Choose a role for ' + name + ': attending, research fellow, resident, student, or other.', 'error'); roleSel.focus(); return; }
   const btn = panel.querySelector('[data-np-save]');
   btn.disabled = true; state.busy = true;
   try {
@@ -1468,7 +1627,7 @@ const VIEW_DEF = {
   dashboard: { shell: dashboardShell, body: dashboardBody },
   research: { shell: () => projectsShell('research', 'Research'), body: () => projectsBody('research', 'Research') },
   qi: { shell: () => projectsShell('qi', 'QI'), body: () => projectsBody('qi', 'QI') },
-  ideas: { shell: ideasShell, body: ideasBody },
+  ideas: { shell: ideasShell, body: ideasBody, top: pinnedHtml }, // pinned links sit above the filters
   tasks: { shell: tasksShell, body: tasksBody },
   deadlines: { shell: deadlinesShell, body: deadlinesBody, body2: timelineBody },
   grants: { shell: grantsShell, body: grantsBody },
@@ -1490,7 +1649,7 @@ function fieldHtml(f, val, vals) {
       '<div class="chips"></div><select class="people-add" id="' + id + '" aria-labelledby="' + id + '-l"></select>' +
       '<div class="newperson" hidden><input type="text" class="np-name" maxlength="80" placeholder="Full name, e.g., Jane Smith" aria-label="New person\'s name">' +
       '<span class="flabel">Role</span><select class="np-role" aria-label="Role of the new person"><option value="">Choose a role…</option>' +
-      PEOPLE_ROLES.map(r => '<option' + (r === FIELD_ROLE[f.k] ? ' selected' : '') + '>' + esc(r) + '</option>').join('') + '</select>' +
+      PEOPLE_ROLES.map(r => '<option value="' + esc(r) + '"' + (r === FIELD_ROLE[f.k] ? ' selected' : '') + '>' + esc(roleLabel(r)) + '</option>').join('') + '</select>' +
       '<span class="flabel">User Highlight Color</span>' + swatches('np-color-' + f.k, 'blue') +
       '<div class="np-actions"><button type="button" class="btn sm primary" data-np-save="1">Add person</button>' +
       '<button type="button" class="btn sm" data-np-cancel="1">Cancel</button></div></div></div></div>';
@@ -1505,7 +1664,7 @@ function fieldHtml(f, val, vals) {
     if (v && !list.includes(v)) list.unshift(v);
     const canAdd = !!LIST_LABELS[f.o];
     input = '<select ' + attrs + (canAdd ? ' data-list="' + f.o + '" data-prev="' + esc(v) + '"' : '') + '><option value="">Choose…</option>' +
-      list.map(o => '<option' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>').join('') +
+      list.map(o => '<option value="' + esc(o) + '"' + (o === v ? ' selected' : '') + '>' + esc(f.o === 'person_role' ? roleLabel(o) : o) + '</option>').join('') +
       (canAdd ? '<option value="' + NEW_CHOICE + '">+ Add a new choice…</option>' : '') + '</select>';
   } else if (f.t === 'list') {
     input = '<select ' + attrs + '><option value="">Choose…</option>' + Object.keys(LIST_LABELS).map(k =>
@@ -1532,14 +1691,16 @@ function fieldHtml(f, val, vals) {
   return '<label class="' + (f.full ? 'full' : '') + '" for="' + id + '"' + when + '>' + label + input + '</label>';
 }
 
-function openForm(tab, id, preset) {
+function openForm(tab, id, preset, opts) {
   const sch = SCHEMA[tab];
   if (!sch) return;
+  state.modalReturn = (opts && opts.returnTo) || null;
   if (tab === 'Contacts' && state.role !== 'admin') return;
   if (tab === 'Options' && id && state.role !== 'admin') { toast('Only an admin can rename or delete a dropdown choice.', 'error'); return; }
   const rec = id ? state.byId[id] : null;
   if (id && !rec) { toast('That entry no longer exists.', 'error'); return; }
   if (tab === 'Options' && rec && rec.list === ORDER_LIST) { openReorder(rec.value); return; } // e.g. from the change log
+  if (tab === 'Options' && rec && rec.list === PIN_LIST) { openPinForm(rec.id); return; }
   const vals = rec ? Object.assign({}, rec) : Object.assign({}, preset || {});
   if ((tab === 'Projects' || tab === 'Ideas') && vals.subspecialty) vals.subspecialty = subspec(vals.subspecialty);
   if (!rec && tab === 'Tasks' && !vals.status) vals.status = 'To Do';
@@ -1553,13 +1714,17 @@ function openForm(tab, id, preset) {
   $('#modal-root').innerHTML =
     '<div class="backdrop" data-close="1"><div class="modal" role="dialog" aria-modal="true" aria-label="' + esc(title) + '">' +
     '<header><h2>' + esc(title.charAt(0).toUpperCase() + title.slice(1)) + '</h2>' + (rec && WATCHABLE.includes(tab) ? watchBtn(tab, rec.id, 'sm') : '') + '<button class="xbtn" type="button" data-close="1" aria-label="Close">×</button></header>' +
-    '<form id="rec-form" novalidate><div class="form">' + sch.fields.map(f => fieldHtml(f, vals[f.k], vals)).join('') + '</div>' +
+    '<form id="rec-form" novalidate data-tab="' + tab + '" data-id="' + esc(rec ? rec.id : '') + '"><div class="form">' + sch.fields.map(f => fieldHtml(f, vals[f.k], vals)).join('') +
+    (tab === 'Projects' ? relSubsFormHtml(rec) : '') + '</div>' +
     '<footer>' + (rec ? '<span class="muted small">Last changed by ' + esc(rec.updated_by || 'unknown') + (rec.updated_at ? ', ' + esc(fmtStamp(rec.updated_at)) : '') + '</span>' : '') +
     '<span class="spacer"></span>' +
     (rec && state.role === 'admin' ? '<button class="btn danger" type="button" id="del-btn">Delete</button>' : '') +
     '<button class="btn" type="button" data-close="1">Cancel</button><button class="btn primary" type="submit">Save</button></footer></form></div></div>';
   const form = $('#rec-form');
   form.querySelectorAll('.people').forEach(renderPicker);
+  form.dataset.initial = formSnapshot(form, tab);
+  const back = state.modalReturn && state.byId[state.modalReturn.id];
+  if (back) $('#modal-root .modal header h2').insertAdjacentHTML('afterend', '<span class="muted small back-note">for ' + esc(back.title || '') + '</span>');
   const first = form.querySelector('input:not([type=hidden]),select,textarea');
   if (first) first.focus();
 
@@ -1667,7 +1832,12 @@ async function openChangeLog() {
   q.focus();
 }
 
-function closeModal() { const r = $('#modal-root'); if (r) r.innerHTML = ''; }
+function closeModal() {
+  const r = $('#modal-root'); if (r) r.innerHTML = '';
+  // A submission opened from a project's form goes back to that project (after the save has been applied).
+  const back = state.modalReturn; state.modalReturn = null;
+  if (back) setTimeout(() => { if (!$('#modal-root').innerHTML && state.byId[back.id]) openForm(back.tab, back.id); }, 0);
+}
 
 async function toggleTask(id, checked, box) {
   const t = state.byId[id];
@@ -1702,6 +1872,19 @@ document.addEventListener('click', e => {
     if (c && pf.dataset.person && c.getBoundingClientRect().top < 0) c.scrollIntoView({ block: 'start' });
     return;
   }
+  const pe = e.target.closest('[data-pin-edit]');
+  if (pe) { openPinForm(pe.dataset.pinEdit); return; }
+  const rb = e.target.closest('[data-reset]');
+  if (rb) {
+    const v = rb.dataset.reset, y = window.scrollY;
+    state.f[v] = Object.assign({}, (state.fd || {})[v] || {});
+    if (v === 'timeline') state.tlOffset = 0;
+    renderView(); window.scrollTo(0, y);
+    const again = document.querySelector('[data-reset="' + v + '"]');
+    if (again) again.focus();
+    toast('Filters reset.');
+    return;
+  }
   const ro = e.target.closest('[data-reorder]');
   if (ro) { openReorder(ro.dataset.reorder); return; }
   const sg = e.target.closest('[data-status-go]');
@@ -1711,6 +1894,17 @@ document.addEventListener('click', e => {
     return;
   }
   if (e.target.closest('[data-clear-status]')) { F(state.view).status = ''; renderView(); return; }
+  const px = e.target.closest('[data-psubs]');
+  if (px) {
+    const set = state.projSubsOpen || (state.projSubsOpen = new Set()), id = px.dataset.psubs;
+    if (set.has(id)) set.delete(id); else set.add(id);
+    renderResults();
+    const again = document.querySelector('[data-psubs="' + id + '"]');
+    if (again) again.focus();
+    return;
+  }
+  const rs = e.target.closest('[data-relsub-open],[data-relsub-add]');
+  if (rs) { openRelatedSub(rs.dataset.relsubOpen || ''); return; }
   const sx = e.target.closest('[data-subs]');
   if (sx) {
     const set = state.subsOpen || (state.subsOpen = new Set()), id = sx.dataset.subs;
