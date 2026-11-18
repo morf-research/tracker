@@ -425,3 +425,14 @@ tr.subs-row[data-edit]:hover .subs-title { text-decoration: underline; }
 tr.subs-foot > td { padding-top: .5rem; padding-bottom: .6rem; border-bottom: 1px solid var(--line); }
 tr.subs-foot .muted { margin-right: .5rem; }
 @media (max-width: 640px) { .subs-spacer { display: none; } .subs-toggle { flex-basis: 2.2rem; } }
+/* Reorder a dropdown list */
+.card h3 .card-btns { display: inline-flex; gap: .4rem; align-items: center; }
+.order-note { margin: .5rem 0 0; }
+.ro-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
+.ro-item { display: flex; align-items: center; gap: .5rem; padding: .35rem .5rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.ro-item .ro-num { width: 2rem; color: var(--muted); font-size: .85rem; text-align: right; }
+.ro-item .ro-name { flex: 1; font-weight: 600; }
+.ro-item .btn[disabled] { opacity: .35; cursor: default; }
+/* Conference location */
+.sub.loc { color: var(--muted); }
+.sub.loc .loc-label { font-weight: 600; }

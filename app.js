@@ -85,6 +85,8 @@ const SCHEMA = {
     { k: 'status', l: 'Status', t: 'select', o: 'deadline_status' },
     { k: 'start_date', l: 'Date (or first day)', t: 'date' },
     { k: 'end_date', l: 'Last day (multi-day events)', t: 'date' },
+    { k: 'location', l: 'Location (city, state, country)', t: 'text', full: true, ph: 'e.g., San Diego, CA, USA', max: 200,
+      showIf: { k: 'type', not: 'deadline|scholarship' } }, // conferences, courses, and other events; not abstract/grant deadlines or scholarships
     { k: 'priority', l: 'Priority', t: 'select', o: 'priority' },
     { k: 'effort', l: 'Effort', t: 'select', o: 'effort' },
     { k: 'team', l: 'Team', t: 'people', full: true },
@@ -208,13 +210,23 @@ function distinct(rows, k, base = []) {
   rows.forEach(r => { if (r[k]) set.add(r[k]); });
   return [...set];
 }
-// Built-in choices for a dropdown plus any an admin has added (Options tab), without repeats.
+// Built-in choices for a dropdown plus any an admin has added (Options tab), without repeats,
+// in the order an admin saved for that list (choices not in the saved order keep their place at the end).
+const ORDER_LIST = '_order'; // must match ORDER_LIST in Code.gs
 function opts(list) {
   const out = OPT[list].slice(), seen = new Set(out.map(v => v.toLowerCase()));
   customChoices(list).forEach(o => {
     if (!seen.has(o.value.toLowerCase())) { seen.add(o.value.toLowerCase()); out.push(o.value); }
   });
-  return out;
+  const order = listOrder(list).map(v => v.toLowerCase());
+  if (!order.length) return out;
+  const pos = v => { const i = order.indexOf(v.toLowerCase()); return i < 0 ? 1e6 : i; };
+  return out.map((v, i) => [v, i]).sort((a, b) => (pos(a[0]) - pos(b[0])) || (a[1] - b[1])).map(x => x[0]);
+}
+function orderRow(list) { return customChoices(ORDER_LIST).find(o => o.value === list); }
+function listOrder(list) {
+  const r = orderRow(list);
+  try { const a = r && r.order ? JSON.parse(r.order) : []; return Array.isArray(a) ? a.filter(v => typeof v === 'string') : []; } catch (e) { return []; }
 }
 // Renamed subspecialties: entries saved under the old name show under the new one, and the edit form switches them over.
 const SUBSPEC_RENAMED = { 'shoulder': 'Shoulder and Elbow', 'elbow': 'Shoulder and Elbow', 'hip & knee': 'Hip & Knee (Recon)' };
@@ -393,6 +405,16 @@ async function demoApi(action, p) {
   if (p.tab === 'Contacts' && state.role !== 'admin') throw apiError('forbidden', 'Only an admin can change Contacts.');
   if (p.tab === 'Options' && action !== 'create' && state.role !== 'admin') throw apiError('forbidden', 'Only an admin can rename or delete a dropdown choice.');
   const checkOption = (o, selfId) => {
+    if (o.list === ORDER_LIST) { // same as checkOrder_ in Code.gs
+      if (!LIST_LABELS[o.value] || o.value === 'people') throw apiError('bad_request', 'That dropdown list cannot be reordered.');
+      let arr;
+      try { arr = o.order ? JSON.parse(o.order) : []; } catch (e) { throw apiError('bad_request', 'The new order could not be read.'); }
+      if (!Array.isArray(arr) || arr.length > 200 || arr.some(v => typeof v !== 'string' || !v.trim() || v.length > 80)) throw apiError('bad_request', 'The new order could not be read.');
+      if (rows.some(x => x.id !== selfId && String(x.archived).toUpperCase() !== 'TRUE' && x.list === ORDER_LIST && x.value === o.value)) throw apiError('bad_request', 'That list already has a saved order. Reload and try again.');
+      o.order = JSON.stringify(arr.map(v => v.trim())); o.color = ''; o.role = '';
+      return;
+    }
+    o.order = '';
     if (!LIST_LABELS[o.list]) throw apiError('bad_request', 'That dropdown list cannot be changed.');
     if (!o.value) throw apiError('bad_request', 'Enter the new choice.');
     if (rows.some(x => x.id !== selfId && String(x.archived).toUpperCase() !== 'TRUE' && x.list === o.list && x.value.toLowerCase() === o.value.toLowerCase())) {
@@ -406,12 +428,13 @@ async function demoApi(action, p) {
   };
   const clean = rec => {
     const o = {};
-    SCHEMA[p.tab].fields.forEach(f => { if (rec && f.k in rec) o[f.k] = String(rec[f.k] == null ? '' : rec[f.k]).trim(); });
+    SCHEMA[p.tab].fields.map(f => f.k).concat(p.tab === 'Options' ? ['order'] : []).forEach(k => { if (rec && k in rec) o[k] = String(rec[k] == null ? '' : rec[k]).trim(); });
     return o;
   };
   const now = new Date().toISOString();
   if (action === 'create') {
     const rec = clean(p.record);
+    if (p.tab === 'Options' && rec.list === ORDER_LIST && state.role !== 'admin') throw apiError('forbidden', 'Only an admin can change the order of a dropdown list.');
     if (p.tab === 'Options') checkOption(rec, null);
     const r = Object.assign(rec, { id: p.tab[0].toLowerCase() + Math.random().toString(16).slice(2, 10), updated_at: now, updated_by: state.name, archived: '' });
     rows.push(r);
@@ -941,7 +964,7 @@ const ICS_PRESENTING = ['Accepted', 'Presented'];
 function icsEvents() {
   const t0 = todayIso();
   const evs = allEvents().filter(e => e.start && (e.end || e.start) >= t0).map(e => ({
-    uid: e.tab + '-' + e.id, start: e.start, end: e.end || e.start, summary: e.name,
+    uid: e.tab + '-' + e.id, start: e.start, end: e.end || e.start, summary: e.name, loc: e.rec.location || '',
     desc: [e.type, e.rec.status && 'Status: ' + e.rec.status, e.rec.sponsor && 'Sponsor: ' + e.rec.sponsor,
       e.rec.team && 'Team: ' + splitNames(e.rec.team).join(', '), e.rec.description].filter(Boolean).join('\n'),
     url: e.rec.link || '' }));
@@ -981,6 +1004,7 @@ function buildIcs(evs) {
     lines.push('BEGIN:VEVENT', 'UID:' + e.uid + '@morf-tracker', 'DTSTAMP:' + stamp,
       'DTSTART;VALUE=DATE:' + icsDate(e.start), 'DTEND;VALUE=DATE:' + icsNextDay(e.end), // all-day end date is exclusive
       'SUMMARY:' + icsText(e.summary), 'TRANSP:TRANSPARENT');
+    if (e.loc) lines.push('LOCATION:' + icsText(e.loc));
     if (e.desc) lines.push('DESCRIPTION:' + icsText(e.desc));
     if (/^https?:\/\//i.test(e.url)) lines.push('URL:' + e.url);
     lines.push('END:VEVENT');
@@ -1017,7 +1041,7 @@ function deadlinesBody() {
   const f = F('deadlines'), t0 = todayIso();
   const evs = allEvents()
     .filter(e => !f.type || e.type === f.type)
-    .filter(e => matches(Object.assign({ name: e.name }, e.rec), f.q, ['name', 'description', 'team', 'status', 'sponsor']));
+    .filter(e => matches(Object.assign({ name: e.name }, e.rec), f.q, ['name', 'description', 'team', 'status', 'sponsor', 'location']));
   let list = evs.filter(e => {
     if (f.show === 'all') return true;
     const isPast = e.start && (e.end || e.start) < t0;
@@ -1042,6 +1066,7 @@ function deadlinesBody() {
   const cols = [
     ['Date', e => e.start ? esc(fmtRange(e.start, e.end)) : '<span class="muted">No date</span>', 'nowrap', 'date'],
     ['Name', e => '<div class="name-cell">' + subsToggle(e) + '<div><span class="title">' + esc(e.name) + '</span>' + linkIcon(e.rec.link) +
+      (e.rec.location ? '<div class="sub loc"><span class="loc-label">Location:</span> ' + esc(e.rec.location) + '</div>' : '') +
       (e.rec.description ? '<div class="sub">' + esc(e.rec.description) + '</div>' : '') + '</div></div>', '', 'name'],
     ['Type', e => typePill(e.type), '', 'type'],
     ['Status', e => pill(e.rec.status), '', 'status'],
@@ -1100,7 +1125,7 @@ function calendar(evs) {
     const day = new Date(y, mo, 1 - lead + i), ds = iso(day);
     const here = evs.filter(e => e.start <= ds && ds <= (e.end || e.start));
     html += '<div class="cal-day' + (day.getMonth() !== mo ? ' other' : '') + (ds === t0 ? ' today' : '') + '"><span class="num">' + day.getDate() + '</span>' +
-      here.slice(0, 3).map(e => '<button type="button" class="cal-ev ' + typeClass(e.type) + '" data-edit="' + e.tab + ':' + esc(e.id) + '" title="' + esc(e.name) + '">' + esc(e.name) + '</button>').join('') +
+      here.slice(0, 3).map(e => '<button type="button" class="cal-ev ' + typeClass(e.type) + '" data-edit="' + e.tab + ':' + esc(e.id) + '" title="' + esc(e.name + (e.rec.location ? ' (' + e.rec.location + ')' : '')) + '">' + esc(e.name) + '</button>').join('') +
       (here.length > 3 ? '<span class="more">+' + (here.length - 3) + ' more</span>' : '') + '</div>';
   }
   return html + '</div></div>';
@@ -1125,7 +1150,7 @@ function timelineItems() {
   d.Deadlines.forEach(r => {
     if (!r.start_date) return;
     const sec = tlSection(r.type), end = r.end_date && r.end_date >= r.start_date ? r.end_date : r.start_date;
-    items.push({ sec: sec, tab: 'Deadlines', id: r.id, label: r.name, sub: [r.type, r.status].filter(Boolean).join(' · '),
+    items.push({ sec: sec, tab: 'Deadlines', id: r.id, label: r.name, sub: [r.type, r.status, r.location].filter(Boolean).join(' · '),
       start: r.start_date, end: end, cls: typeClass(r.type), milestone: end === r.start_date && sec !== 'conf' && sec !== 'course',
       txt: fmtRange(r.start_date, end) });
   });
@@ -1310,14 +1335,68 @@ function choicesBody() {
       : '<span class="pill person ' + personColor(o) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '">' + esc(o.value) + '</span>').join('') + '</div></div>').join('')
       : '<div class="choices"><span class="muted small">No one yet. Add a person here or from any PI, lead, or team field.</span></div>') + '</section>';
   return peopleCard + '<div class="grid">' + Object.keys(LIST_LABELS).filter(k => k !== 'people').map(k => {
-    const added = customChoices(k).slice().sort(byText('value'));
-    return '<section class="card"><h3>' + esc(LIST_LABELS[k]) + addBtn('Options', { list: k }, 'Add') + '</h3><div class="choices">' +
-      OPT[k].map(v => '<span class="pill grey" title="Built in">' + esc(v) + '</span>').join('') +
-      added.map(o => state.role === 'admin'
-        ? '<button type="button" class="pill choice" data-edit="Options:' + esc(o.id) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '. Click to rename or delete.">' + esc(o.value) + '</button>'
-        : '<span class="pill choice ro" title="Added by ' + esc(o.updated_by || 'unknown') + '">' + esc(o.value) + '</span>').join('') +
-      '</div></section>';
+    const added = customChoices(k), builtIn = new Set(OPT[k].map(v => v.toLowerCase()));
+    return '<section class="card" data-list-card="' + k + '"><h3>' + esc(LIST_LABELS[k]) + '<span class="card-btns">' +
+      (admin ? '<button type="button" class="btn sm" data-reorder="' + k + '" title="Change the order this list appears in every dropdown">Reorder</button>' : '') +
+      addBtn('Options', { list: k }, 'Add') + '</span></h3><div class="choices">' +
+      opts(k).map(v => {
+        const o = builtIn.has(v.toLowerCase()) ? null : added.find(x => x.value.toLowerCase() === v.toLowerCase());
+        if (!o) return '<span class="pill grey" title="Built in">' + esc(v) + '</span>';
+        return admin
+          ? '<button type="button" class="pill choice" data-edit="Options:' + esc(o.id) + '" title="Added by ' + esc(o.updated_by || 'unknown') + '. Click to rename or delete.">' + esc(o.value) + '</button>'
+          : '<span class="pill choice ro" title="Added by ' + esc(o.updated_by || 'unknown') + '">' + esc(o.value) + '</span>';
+      }).join('') + '</div>' + (listOrder(k).length ? '<p class="muted small order-note">Custom order set by an admin.</p>' : '') + '</section>';
   }).join('') + '</div>';
+}
+
+// ---------- Reorder a dropdown list (admin) ----------
+function openReorder(list) {
+  if (state.role !== 'admin' || !LIST_LABELS[list] || list === 'people') return;
+  const items = opts(list), custom = listOrder(list).length > 0;
+  const li = (v, i, n) => '<li class="ro-item" data-value="' + esc(v) + '"><span class="ro-num">' + (i + 1) + '.</span><span class="ro-name">' + esc(v) + '</span>' +
+    '<button type="button" class="btn sm" data-move="-1" aria-label="Move ' + esc(v) + ' up"' + (i ? '' : ' disabled') + '>↑</button>' +
+    '<button type="button" class="btn sm" data-move="1" aria-label="Move ' + esc(v) + ' down"' + (i < n - 1 ? '' : ' disabled') + '>↓</button></li>';
+  $('#modal-root').innerHTML =
+    '<div class="backdrop" data-close="1"><div class="modal" role="dialog" aria-modal="true" aria-label="Reorder ' + esc(LIST_LABELS[list]) + '">' +
+    '<header><h2>Reorder: ' + esc(LIST_LABELS[list]) + '</h2><button class="xbtn" type="button" data-close="1" aria-label="Close">×</button></header>' +
+    '<form id="reorder-form" novalidate><div class="form"><p class="muted small full">Use the arrows to move a choice. Every dropdown, filter, and Dashboard count for this list uses the new order for everyone.</p>' +
+    '<ol class="ro-list full">' + items.map((v, i) => li(v, i, items.length)).join('') + '</ol></div>' +
+    '<footer>' + (custom ? '<button type="button" class="btn" id="ro-reset" title="Go back to the built-in order, with added choices at the end">Reset to default order</button>' : '') +
+    '<span class="spacer"></span><button class="btn" type="button" data-close="1">Cancel</button><button class="btn primary" type="submit">Save order</button></footer></form></div></div>';
+  const ol = $('#reorder-form .ro-list');
+  const renumber = () => {
+    const all = [...ol.children];
+    all.forEach((x, i) => { x.querySelector('.ro-num').textContent = (i + 1) + '.'; x.querySelector('[data-move="-1"]').disabled = !i; x.querySelector('[data-move="1"]').disabled = i === all.length - 1; });
+  };
+  ol.addEventListener('click', ev => {
+    const b = ev.target.closest('[data-move]');
+    if (!b) return;
+    const item = b.closest('li'), dir = Number(b.dataset.move);
+    if (dir < 0 && item.previousElementSibling) ol.insertBefore(item, item.previousElementSibling);
+    if (dir > 0 && item.nextElementSibling) ol.insertBefore(item.nextElementSibling, item);
+    renumber();
+    const again = item.querySelector('[data-move="' + dir + '"]');
+    (again && !again.disabled ? again : item.querySelector('[data-move="' + (-dir) + '"]')).focus();
+  });
+  const save = async order => {
+    const row = orderRow(list), btn = $('#reorder-form button[type=submit]');
+    btn.disabled = true; state.busy = true;
+    try {
+      const j = row ? await api('update', { tab: 'Options', id: row.id, record: { order: JSON.stringify(order) }, expected_updated_at: row.updated_at })
+                    : await api('create', { tab: 'Options', record: { list: ORDER_LIST, value: list, order: JSON.stringify(order) } });
+      applySaved('Options', j.record, j.version);
+      closeModal();
+      toast(order.length ? 'Saved the new order of ' + LIST_LABELS[list] + '.' : LIST_LABELS[list] + ' is back to the default order.');
+    } catch (e) {
+      if (e.code === 'conflict' || e.code === 'not_found') { toast(e.message, 'error'); loadData(); } else handleError(e);
+      btn.disabled = false;
+    } finally { state.busy = false; }
+  };
+  $('#reorder-form').addEventListener('submit', ev => { ev.preventDefault(); save([...ol.children].map(x => x.dataset.value)); });
+  const rs = $('#ro-reset');
+  if (rs) rs.addEventListener('click', () => save([]));
+  const first = ol.querySelector('[data-move="1"]');
+  if (first) first.focus();
 }
 
 // Admin picks "+ Add a new choice…" inside a form's dropdown: save it to the Options tab and select it.
@@ -1398,6 +1477,7 @@ const VIEW_DEF = {
 };
 
 // ===================== Add / edit form =====================
+function showFor(notRe, v) { return !new RegExp(notRe, 'i').test(String(v || '')); }
 function fieldHtml(f, val, vals) {
   const id = 'fld-' + f.k, v = val == null ? '' : String(val);
   const label = esc(f.l) + (f.req ? ' <span class="req">*</span>' : '');
@@ -1447,7 +1527,8 @@ function fieldHtml(f, val, vals) {
     const type = f.t === 'date' ? 'date' : f.t === 'url' ? 'url' : 'text';
     input = '<input type="' + type + '" ' + attrs + ' value="' + esc(v) + '"' + (f.ph ? ' placeholder="' + esc(f.ph) + '"' : '') + ' maxlength="' + (f.max || 4000) + '">';
   }
-  const when = f.when ? ' data-when="' + esc(f.when) + '"' + ((vals || {}).list === f.when ? '' : ' hidden') : '';
+  let when = f.when ? ' data-when="' + esc(f.when) + '"' + ((vals || {}).list === f.when ? '' : ' hidden') : '';
+  if (f.showIf) when += ' data-show-k="' + f.showIf.k + '" data-show-not="' + esc(f.showIf.not) + '"' + (showFor(f.showIf.not, (vals || {})[f.showIf.k]) ? '' : ' hidden');
   return '<label class="' + (f.full ? 'full' : '') + '" for="' + id + '"' + when + '>' + label + input + '</label>';
 }
 
@@ -1458,6 +1539,7 @@ function openForm(tab, id, preset) {
   if (tab === 'Options' && id && state.role !== 'admin') { toast('Only an admin can rename or delete a dropdown choice.', 'error'); return; }
   const rec = id ? state.byId[id] : null;
   if (id && !rec) { toast('That entry no longer exists.', 'error'); return; }
+  if (tab === 'Options' && rec && rec.list === ORDER_LIST) { openReorder(rec.value); return; } // e.g. from the change log
   const vals = rec ? Object.assign({}, rec) : Object.assign({}, preset || {});
   if ((tab === 'Projects' || tab === 'Ideas') && vals.subspecialty) vals.subspecialty = subspec(vals.subspecialty);
   if (!rec && tab === 'Tasks' && !vals.status) vals.status = 'To Do';
@@ -1620,6 +1702,8 @@ document.addEventListener('click', e => {
     if (c && pf.dataset.person && c.getBoundingClientRect().top < 0) c.scrollIntoView({ block: 'start' });
     return;
   }
+  const ro = e.target.closest('[data-reorder]');
+  if (ro) { openReorder(ro.dataset.reorder); return; }
   const sg = e.target.closest('[data-status-go]');
   if (sg) {
     state.f[sg.dataset.statusGo] = { show: 'all', status: sg.dataset.status };
@@ -1692,8 +1776,10 @@ document.addEventListener('change', e => {
     } else if (v) pickPerson(box, v);
   }
   if (e.target.name === 'list' && e.target.closest('#rec-form')) {
-    const w = document.querySelector('#rec-form [data-when]');
-    if (w) w.hidden = e.target.value !== w.dataset.when;
+    document.querySelectorAll('#rec-form [data-when]').forEach(w => { w.hidden = e.target.value !== w.dataset.when; });
+  }
+  if (e.target.name && e.target.closest('#rec-form')) {
+    document.querySelectorAll('#rec-form [data-show-k="' + e.target.name + '"]').forEach(w => { w.hidden = !showFor(w.dataset.showNot, e.target.value); });
   }
 });
 document.addEventListener('keydown', e => {
